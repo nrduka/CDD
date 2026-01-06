@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SMHC Queueing System Flow</title>
+    <style>
+        :root {
+            color-scheme: light dark;
+            --bg: #0f172a;
+            --panel: #1e293b;
+            --panel-alt: #334155;
+            --accent: #38bdf8;
+            --accent-alt: #c084fc;
+            --text: #e2e8f0;
+            --muted: #94a3b8;
+            --success: #34d399;
+            --warning: #f97316;
+        }
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 1.5rem;
+            padding: clamp(1rem, 2vw, 2.5rem);
+            font-family: "Inter", "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            background: radial-gradient(circle at 15% 30%, rgba(56, 189, 248, 0.2), transparent 50%),
+                        radial-gradient(circle at 85% 20%, rgba(192, 132, 252, 0.18), transparent 55%),
+                        var(--bg);
+            color: var(--text);
+        }
+        h1 {
+            margin: 0;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            font-size: clamp(1.75rem, 3vw, 2.4rem);
+            text-align: center;
+        }
+        .flow-container {
+            width: min(1200px, 95vw);
+            display: grid;
+            gap: 1.75rem;
+        }
+        .swimlanes {
+            display: grid;
+            gap: 1.5rem;
+        }
+        .lane {
+            display: grid;
+            gap: 0.75rem;
+        }
+        .lane-header {
+            font-size: 0.95rem;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+        .lane-flow {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1rem;
+            align-items: center;
+        }
+        .step {
+            position: relative;
+            flex: 1 1 clamp(220px, 25%, 280px);
+            min-height: 140px;
+            background: linear-gradient(150deg, var(--panel), var(--panel-alt));
+            border: 1px solid rgba(148, 163, 184, 0.25);
+            border-radius: 18px;
+            padding: 1.1rem 1.3rem;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.35);
+        }
+        .step::after {
+            content: "";
+            position: absolute;
+            top: 50%;
+            right: -0.65rem;
+            width: 12px;
+            height: 12px;
+            border-top: 2px solid rgba(148, 163, 184, 0.65);
+            border-right: 2px solid rgba(148, 163, 184, 0.65);
+            transform: translateY(-50%) rotate(45deg);
+        }
+        .step:last-of-type::after {
+            display: none;
+        }
+        .step-title {
+            font-weight: 600;
+            font-size: 1rem;
+            letter-spacing: 0.04em;
+        }
+        .step-meta {
+            font-size: 0.9rem;
+            color: var(--muted);
+            margin-top: 0.35rem;
+            line-height: 1.5;
+        }
+        .tags {
+            display: flex;
+            gap: 0.35rem;
+            flex-wrap: wrap;
+            margin-top: 0.75rem;
+        }
+        .tag {
+            font-size: 0.72rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            padding: 0.3rem 0.55rem;
+            border-radius: 999px;
+            border: 1px solid rgba(148, 163, 184, 0.35);
+        }
+        .tag.accent { border-color: rgba(56, 189, 248, 0.6); color: var(--accent); }
+        .tag.alt { border-color: rgba(192, 132, 252, 0.6); color: var(--accent-alt); }
+        .tag.success { border-color: rgba(52, 211, 153, 0.6); color: var(--success); }
+        .tag.warn { border-color: rgba(249, 115, 22, 0.6); color: var(--warning); }
+
+        .legend {
+            margin-top: 2rem;
+            display: grid;
+            gap: 0.75rem;
+            font-size: 0.9rem;
+            color: var(--muted);
+        }
+        .legend strong {
+            color: var(--text);
+        }
+        @media (max-width: 768px) {
+            .step {
+                flex: 1 1 100%;
+            }
+            .step::after {
+                display: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <h1>SMHC Counter & Department Queue Flow</h1>
+
+    <div class="flow-container">
+        <section class="swimlanes">
+            <div class="lane">
+                <div class="lane-header">1. Ticket Creation</div>
+                <div class="lane-flow">
+                    <div class="step">
+                        <div>
+                            <div class="step-title">Generate Ticket</div>
+                            <div class="step-meta">
+                                Patient registers at kiosk or reception. Entry saved in <strong>daily_queue</strong>.
+                            </div>
+                        </div>
+                        <div class="tags">
+                            <span class="tag accent">daily_queue</span>
+                            <span class="tag alt">ticketing</span>
+                        </div>
+                    </div>
+                    <div class="step">
+                        <div>
+                            <div class="step-title">Waiting Queue Monitor</div>
+                            <div class="step-meta">
+                                Counter attendants view available tickets that are not yet assigned to any counter or department.
+                            </div>
+                        </div>
+                        <div class="tags">
+                            <span class="tag accent">queue_board.php</span>
+                            <span class="tag">waiting-list</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="lane">
+                <div class="lane-header">2. Counter Interaction</div>
+                <div class="lane-flow">
+                    <div class="step">
+                        <div>
+                            <div class="step-title">Call from Counter</div>
+                            <div class="step-meta">
+                                Attendant calls selected ticket. Entry created in <strong>queue_calls</strong> with status <em>ACTIVE</em>.
+                            </div>
+                        </div>
+                        <div class="tags">
+                            <span class="tag accent">queue_calls</span>
+                            <span class="tag">Call Selected</span>
+                        </div>
+                    </div>
+                    <div class="step">
+                        <div>
+                            <div class="step-title">Serve / Provide Service</div>
+                            <div class="step-meta">
+                                Ticket appears in the “Currently Serving” panel and the public display. Attendant may complete or reroute.
+                            </div>
+                        </div>
+                        <div class="tags">
+                            <span class="tag success">announce</span>
+                            <span class="tag">customer_board</span>
+                        </div>
+                    </div>
+                    <div class="step">
+                        <div>
+                            <div class="step-title">Route to Department</div>
+                            <div class="step-meta">
+                                For additional services, the ticket is pushed to <strong>department_queue</strong> with status <em>WAITING</em>.
+                            </div>
+                        </div>
+                        <div class="tags">
+                            <span class="tag alt">department_queue</span>
+                            <span class="tag">Route</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="lane">
+                <div class="lane-header">3. Department Workflow</div>
+                <div class="lane-flow">
+                    <div class="step">
+                        <div>
+                            <div class="step-title">Department Calls Ticket</div>
+                            <div class="step-meta">
+                                Department user moves entry to <em>CALLED</em>. Public board announces via “Now Serving”.
+                            </div>
+                        </div>
+                        <div class="tags">
+                            <span class="tag alt">department_call</span>
+                            <span class="tag">public display</span>
+                        </div>
+                    </div>
+                    <div class="step">
+                        <div>
+                            <div class="step-title">Department Completes</div>
+                            <div class="step-meta">
+                                When finished, status becomes <em>DONE</em>. Optionally auto-routes back to another department or counter.
+                            </div>
+                        </div>
+                        <div class="tags">
+                            <span class="tag success">department_complete</span>
+                            <span class="tag warn">optional re-route</span>
+                        </div>
+                    </div>
+                    <div class="step">
+                        <div>
+                            <div class="step-title">Counter Follow-up (Optional)</div>
+                            <div class="step-meta">
+                                If routed back, the counter sees it in “Routed From Departments”, can call again or complete the journey.
+                            </div>
+                        </div>
+                        <div class="tags">
+                            <span class="tag accent">counter_queue</span>
+                            <span class="tag success">Complete Routed</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="lane">
+                <div class="lane-header">4. Completion</div>
+                <div class="lane-flow">
+                    <div class="step">
+                        <div>
+                            <div class="step-title">Mark as Done</div>
+                            <div class="step-meta">
+                                Both counter and department can finalize their steps. Ticket history remains for reporting.
+                            </div>
+                        </div>
+                        <div class="tags">
+                            <span class="tag success">DONE</span>
+                            <span class="tag accent">reporting</span>
+                        </div>
+                    </div>
+                    <div class="step">
+                        <div>
+                            <div class="step-title">Return to Queue (Exception)</div>
+                            <div class="step-meta">
+                                Counters may return tickets to the waiting pool if a customer is not present.
+                            </div>
+                        </div>
+                        <div class="tags">
+                            <span class="tag warn">RETURNED</span>
+                            <span class="tag">retry</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <div class="legend">
+            <strong>Legend</strong>
+            <div>• <span class="tag accent">Blue</span> tables hold primary counter data.</div>
+            <div>• <span class="tag alt">Purple</span> tags highlight department routing.</div>
+            <div>• <span class="tag success">Green</span> tags show completion or success paths.</div>
+            <div>• <span class="tag warn">Orange</span> tags indicate optional or exception flows.</div>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,24 @@
+CREATE TABLE IF NOT EXISTS `daily_queue` (
+    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `category` VARCHAR(20) NOT NULL,
+    `queue_number` INT UNSIGNED NOT NULL,
+    `unique_code` VARCHAR(16) NOT NULL,
+    `queue_date` DATE NOT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uq_date_cat_num` (`queue_date`,`category`,`queue_number`),
+    UNIQUE KEY `uq_unique_code` (`unique_code`),
+    KEY `idx_date_cat` (`queue_date`,`category`));
+
+CREATE TABLE IF NOT EXISTS `queue_calls` (
+    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `queue_id` INT UNSIGNED NOT NULL,
+    `counter_user_id` INT UNSIGNED NOT NULL,
+    `counter_number` VARCHAR(50) NOT NULL,
+    `status` ENUM('ACTIVE','DONE','RETURNED','CANCELLED') NOT NULL DEFAULT 'ACTIVE',
+    `called_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `completed_at` DATETIME DEFAULT NULL,
+    PRIMARY KEY (`id`),
+    KEY `idx_queue_status` (`queue_id`,`status`),
+    KEY `idx_counter_status` (`counter_user_id`,`status`)
+);

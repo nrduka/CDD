@@ -1,0 +1,29 @@
+C:\Users\Administrator>cd..
+
+C:\Users>cd..
+
+C:\>cd C:\xampp\mysql\bin
+
+C:\xampp\mysql\bin>mysql -u root mpcdtr < C:\sql\mpcdtr.sql
+C:\xampp\mysql\bin>mysql -u root betspayroll < C:\sql\betspayroll.sql
+C:\xampp\mysql\bin>mysql -u root el < C:\sql\el.sql
+C:\xampp\mysql\bin>mysql -u root inventory < C:\sql\inventory.sql
+C:\xampp\mysql\bin>mysql -u root jupiter < C:\sql\jupiter.sql
+C:\xampp\mysql\bin>mysql -u root property_ledger < C:\sql\property_ledger.sql
+C:\xampp\mysql\bin>mysql -u root teammarvil2019 < < C:\sql\teammarvil2019.sql
+C:\xampp\mysql\bin>mysql -u root spms <  C:\sql\spms.sql
+C:\xampp\mysql\bin>mysql -u root sslms <  C:\sql\sslms.sql
+C:\xampp\mysql\bin>mysql -u root teammarvil2019 < C:\xampp\htdocs\sql\teammarvil2019.sql
+
+C:\xampp\mysql\bin>mysql -u root atlantis < C:\sql\atlantis.sql
+C:\xampp\mysql\bin>mysql -u root senior < C:\sql\senior.sql
+C:\xampp\mysql\bin>mysql -u root mpc_ems < C:\sql\mpc_ems.sql
+
+C:\xampp\mysql\bin>mysql -u root mpc_ems_sm < C:\sql\mpc_ems_sm.sql
+
+
+
+
+C:\xampp\mysql\bin>
+
+SET GLOBAL time_zone = "+08:00";
