@@ -38,6 +38,13 @@
                                     <span class="side-menu__label">Home</span>
                                 </a>
                             </li>
+
+                            <li class="slide">
+                                <a href="pos_terminal.php" class="side-menu__item">
+                                    <i class="bx bx-cart side-menu__icon"></i>
+                                    <span class="side-menu__label">POS Terminal</span>
+                                </a>
+                            </li>
                             <!-- End::slide -->
 
                             <!-- Start::slide -->

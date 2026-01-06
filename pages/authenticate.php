@@ -40,7 +40,7 @@
 		session_write_close();
 
 		if( ($_SESSION['sess_userrole'] == "Admin") || ( $_SESSION['sess_userrole'] == "Nonadmin")){
-			header('Location: /smhc/pages/index.php');
+			header('Location: /cdd/pages/index.php');
 		}else{
 			header('Location: index.php');
 		}

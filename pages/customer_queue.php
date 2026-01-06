@@ -127,7 +127,7 @@ session_start();
 <?php ob_start(); ?>
 
 <?php
-// Use smhc DB connection
+// Use cdd DB connection
 require_once __DIR__ . '/db2.php'; // exposes $mysqli
 
 // Ensure connection is available
@@ -135,8 +135,8 @@ if (!isset($mysqli) || !$mysqli) {
     die('Database connection not available.');
 }
 
-if (!function_exists('smhc_generate_code_segment')) {
-    function smhc_generate_code_segment($length = 3)
+if (!function_exists('cdd_generate_code_segment')) {
+    function cdd_generate_code_segment($length = 3)
     {
         $length = max(1, (int)$length);
         $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -187,7 +187,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['category'])) {
         $attempts = 0;
         do {
             $prefixLength = $attempts >= 5 ? 5 : 3;
-            $qrCode = smhc_generate_code_segment($prefixLength) . $dateSegment . $queueCode;
+            $qrCode = cdd_generate_code_segment($prefixLength) . $dateSegment . $queueCode;
             $chk = $mysqli->prepare("SELECT 1 FROM daily_queue WHERE unique_code = ? LIMIT 1");
             $chk->bind_param('s', $qrCode);
             $chk->execute();
@@ -198,7 +198,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['category'])) {
         } while ($exists && $attempts < 7);
 
         if ($exists) {
-            $qrCode = smhc_generate_code_segment(8) . $dateSegment . $queueCode;
+            $qrCode = cdd_generate_code_segment(8) . $dateSegment . $queueCode;
         }
 
         // Insert record

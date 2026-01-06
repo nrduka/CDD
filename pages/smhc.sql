@@ -11,9 +11,9 @@ SET time_zone = '+00:00';
 /*!40101 SET @OLD_COLLATION_CONNECTION=@@COLLATION_CONNECTION */;
 /*!40101 SET NAMES utf8mb4 */;
 
-DROP DATABASE IF EXISTS `smhc`;
-CREATE DATABASE `smhc` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE `smhc`;
+DROP DATABASE IF EXISTS `cdd`;
+CREATE DATABASE `cdd` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE `cdd`;
 
 -- ---------------------------------------------------------------------------
 -- Table: user

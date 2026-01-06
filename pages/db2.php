@@ -17,7 +17,7 @@ $conn = mysql_connect("localhost","root","root")
  */
  
 $databaseHost = 'localhost';
-$databaseName = 'smhc';
+$databaseName = 'cdd';
 $databaseUsername = 'root';
 $databasePassword = '';
  
