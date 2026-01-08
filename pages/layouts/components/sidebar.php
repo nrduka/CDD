@@ -4,11 +4,11 @@
                 <!-- Start::main-sidebar-header -->
                 <div class="main-sidebar-header">
                     <a href="index.php" class="header-logo">
-                        <img src="<?php echo $baseUrl; ?>/assets/images/company-logos/SIERRA HEALTH-01.jpg" alt="Sierra Health logo" class="desktop-logo desktop-white">
-                        <img src="<?php echo $baseUrl; ?>/assets/images/company-logos/SIERRA HEALTH-01.jpg" alt="Sierra Health logo" class="desktop-dark">
-                        <img src="<?php echo $baseUrl; ?>/assets/images/company-logos/SIERRA HEALTH-01.jpg" alt="Sierra Health logo" class="toggle-logo">
-                        <img src="<?php echo $baseUrl; ?>/assets/images/company-logos/SIERRA HEALTH-01.jpg" alt="Sierra Health logo" class="toggle-dark">
-                        <img src="<?php echo $baseUrl; ?>/assets/images/company-logos/SIERRA HEALTH-01.jpg" alt="Sierra Health logo" class="toggle-white">
+                        <img src="<?php echo $baseUrl; ?>/assets/images/company-logos/CDD.png" alt="CDD logo" class="desktop-logo desktop-white">
+                        <img src="<?php echo $baseUrl; ?>/assets/images/company-logos/CDD.png" alt="CDD logo" class="desktop-dark">
+                        <img src="<?php echo $baseUrl; ?>/assets/images/company-logos/CDD.png" alt="CDD logo" class="toggle-logo">
+                        <img src="<?php echo $baseUrl; ?>/assets/images/company-logos/CDD.png" alt="CDD logo" class="toggle-dark">
+                        <img src="<?php echo $baseUrl; ?>/assets/images/company-logos/CDD.png" alt="CDD logo" class="toggle-white">
                     </a>
                 </div>
                 <!-- End::main-sidebar-header -->

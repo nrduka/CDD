@@ -27,7 +27,7 @@
                     <div class="card custom-card">
                         <div class="card-body p-4">
                             <p class="h5 fw-semibold mb-2 text-center">Log In</p>
-                            <p class="mb-4 text-muted op-7 fw-normal text-center">SIERRA MAKILING HEALTH CORPORATION</p>
+                            <p class="mb-4 text-muted op-7 fw-normal text-center">COLDDUST BENTEL ICE MANUFACTURING</p>
 
 
                         <form method="post" action="authenticate.php" name="admin_form">

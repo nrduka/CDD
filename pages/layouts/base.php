@@ -17,7 +17,7 @@ if (function_exists('date_default_timezone_set')) {
         <meta name="keywords" content="dashboard, template dashboard, Bootstrap dashboard, admin panel template, sales dashboard, Bootstrap admin panel, stocks dashboard, crm admin dashboard, ecommerce admin panel, admin template, admin panel dashboard, course dashboard, template ecommerce website, dashboard hrm, admin dashboard">
 
         <!-- TITLE -->
-        <title>SMHC</title>
+        <title>CDD BENTEL</title>
 
         <!-- FAVICON -->
         <link rel="icon" href="<?php echo $baseUrl; ?>/assets/images/company-logos/header_icon.webp" type="image/x-icon">

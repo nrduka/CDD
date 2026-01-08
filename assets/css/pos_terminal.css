@@ -53,6 +53,20 @@
     padding: 1rem;
 }
 
+.pos-terminal-customer-details textarea {
+    resize: none;
+}
+
+.pos-terminal-items .table {
+    background: #fff;
+    margin-bottom: 0;
+}
+
+.pos-terminal-empty {
+    padding: 0.75rem 0;
+    text-align: center;
+}
+
 .pos-terminal-summary-row {
     display: flex;
     align-items: center;
@@ -73,6 +87,19 @@
 .pos-terminal-grand span {
     font-size: 1.2rem;
     font-weight: 700;
+}
+
+
+.pos-terminal-delivery-fields {
+    margin-top: 0.25rem;
+}
+
+.pos-terminal-order-type {
+    align-items: center;
+}
+
+.pos-terminal-order-type .form-check {
+    margin-bottom: 0;
 }
 
 @media (max-width: 767.98px) {
