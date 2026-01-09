@@ -22,6 +22,40 @@ function send_pos_json_response($payload, $statusCode = 200)
     exit;
 }
 
+function generate_pos_order_no($mysqli)
+{
+    $orderPrefix = date('y') . '-' . date('m') . '-';
+    $sequenceSql = "INSERT INTO sales_order_sequence (prefix, last_number)
+        VALUES (?, LAST_INSERT_ID(1))
+        ON DUPLICATE KEY UPDATE last_number = LAST_INSERT_ID(last_number + 1)";
+    $stmt = $mysqli->prepare($sequenceSql);
+    if (!$stmt) {
+        return [null, 'Unable to prepare order number sequence.'];
+    }
+    $stmt->bind_param('s', $orderPrefix);
+    if (!$stmt->execute()) {
+        $stmt->close();
+        return [null, 'Unable to generate order number.'];
+    }
+    $seriesNumber = (int)$mysqli->insert_id;
+    $stmt->close();
+    if ($seriesNumber <= 0) {
+        return [null, 'Invalid order number generated.'];
+    }
+    return [$orderPrefix . sprintf('%04d', $seriesNumber), null];
+}
+
+function is_pos_duplicate_key_error($stmt, $mysqli)
+{
+    $errorNo = 0;
+    if ($stmt && $stmt->errno) {
+        $errorNo = $stmt->errno;
+    } elseif ($mysqli && $mysqli->errno) {
+        $errorNo = $mysqli->errno;
+    }
+    return $errorNo === 1062;
+}
+
 if ($isPosSubmission) {
     if (!isset($mysqli) || !$mysqli) {
         send_pos_json_response(['success' => false, 'message' => 'Database connection unavailable.'], 500);
@@ -31,6 +65,15 @@ if ($isPosSubmission) {
     $payload = json_decode($rawBody, true);
     if (!is_array($payload)) {
         send_pos_json_response(['success' => false, 'message' => 'Invalid order payload.'], 400);
+    }
+
+    $action = trim((string)(isset($payload['action']) ? $payload['action'] : ''));
+    if ($action === 'reserve_order_no') {
+        list($reservedOrderNo, $reserveError) = generate_pos_order_no($mysqli);
+        if ($reserveError) {
+            send_pos_json_response(['success' => false, 'message' => $reserveError], 500);
+        }
+        send_pos_json_response(['success' => true, 'order_no' => $reservedOrderNo]);
     }
 
     $customerCode = trim((string)(isset($payload['customer_code']) ? $payload['customer_code'] : ''));
@@ -59,97 +102,135 @@ if ($isPosSubmission) {
         $timeDelivery = $timeDelivery !== '' ? $timeDelivery : null;
     }
 
+    $printedAt = trim((string)(isset($payload['printed_at']) ? $payload['printed_at'] : ''));
+    if ($printedAt !== '') {
+        $printedAtValue = DateTime::createFromFormat('Y-m-d H:i:s', $printedAt);
+        $printedAt = $printedAtValue ? $printedAtValue->format('Y-m-d H:i:s') : date('Y-m-d H:i:s');
+    } else {
+        $printedAt = date('Y-m-d H:i:s');
+    }
+
     $items = isset($payload['items']) ? $payload['items'] : array();
     if (!is_array($items) || count($items) === 0) {
         send_pos_json_response(['success' => false, 'message' => 'Add at least one item before submitting.'], 422);
     }
 
-    $orderPrefix = date('y') . '-' . date('m') . '-';
-    $seriesNumber = 1;
-    $seriesStmt = $mysqli->prepare("SELECT MAX(CAST(SUBSTRING(order_no, 7, 4) AS UNSIGNED)) AS max_series FROM sales WHERE order_no LIKE CONCAT(?, '%')");
-    if (!$seriesStmt) {
-        send_pos_json_response(['success' => false, 'message' => 'Unable to prepare order series lookup.'], 500);
+    $orderNo = trim((string)(isset($payload['order_no']) ? $payload['order_no'] : ''));
+    $maxInsertAttempts = 3;
+    $amountReceived = isset($payload['amt_received']) ? (float)$payload['amt_received'] : 0.0;
+    if ($amountReceived < 0) {
+        $amountReceived = 0.0;
     }
-    $seriesStmt->bind_param('s', $orderPrefix);
-    if (!$seriesStmt->execute()) {
-        $seriesStmt->close();
-        send_pos_json_response(['success' => false, 'message' => 'Unable to fetch order series.'], 500);
+    $amountChange = isset($payload['amt_change']) ? (float)$payload['amt_change'] : 0.0;
+    if ($amountChange < 0) {
+        $amountChange = 0.0;
     }
-    $seriesStmt->bind_result($maxSeries);
-    if ($seriesStmt->fetch() && $maxSeries) {
-        $seriesNumber = (int)$maxSeries + 1;
-    }
-    $seriesStmt->close();
 
-    $orderNo = $orderPrefix . sprintf('%04d', $seriesNumber);
-    $insertSql = "INSERT INTO sales (order_no, customer_code, delivery_instruction, lineitem, qty, product_code, product_description, lineitem_discount, discount, unit_price, amount, date_delivery, time_delivery, date_created)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())";
+    $insertSql = "INSERT INTO sales (order_no, customer_code, delivery_instruction, lineitem, qty, product_code, product_description, lineitem_discount, discount, unit_price, amount, date_delivery, time_delivery, date_created, amt_received, amt_change)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
     $insertStmt = $mysqli->prepare($insertSql);
     if (!$insertStmt) {
         send_pos_json_response(['success' => false, 'message' => 'Unable to prepare order insert.'], 500);
     }
 
-    $mysqli->begin_transaction();
-    $lineItemNumber = 0;
-    foreach ($items as $item) {
-        $lineItemNumber++;
-        if (!is_array($item)) {
+    $attempt = 0;
+    while ($attempt < $maxInsertAttempts) {
+        if ($orderNo === '') {
+            list($orderNo, $orderNoError) = generate_pos_order_no($mysqli);
+            if ($orderNoError) {
+                $insertStmt->close();
+                send_pos_json_response(['success' => false, 'message' => $orderNoError], 500);
+            }
+        }
+
+        if (!$mysqli->begin_transaction()) {
+            $insertStmt->close();
+            send_pos_json_response(['success' => false, 'message' => 'Unable to start order transaction.'], 500);
+        }
+
+        $lineItemNumber = 0;
+        $duplicateOrderNo = false;
+        foreach ($items as $item) {
+            $lineItemNumber++;
+            if (!is_array($item)) {
+                $mysqli->rollback();
+                $insertStmt->close();
+                send_pos_json_response(['success' => false, 'message' => 'Invalid line item data.'], 422);
+            }
+
+            $productCode = trim((string)(isset($item['product_code']) ? $item['product_code'] : ''));
+            $productDescription = trim((string)(isset($item['product_description']) ? $item['product_description'] : ''));
+            $quantity = isset($item['quantity']) ? (float)$item['quantity'] : 0.0;
+            $unitPrice = isset($item['unit_price']) ? (float)$item['unit_price'] : 0.0;
+            $lineitemDiscountPerUnit = isset($item['lineitem_discount']) ? (float)$item['lineitem_discount'] : 0.0;
+
+            if ($productCode === '' || $productDescription === '' || $quantity <= 0) {
+                $mysqli->rollback();
+                $insertStmt->close();
+                send_pos_json_response(['success' => false, 'message' => 'Line items must include product and quantity.'], 422);
+            }
+
+            if ($lineitemDiscountPerUnit < 0) {
+                $lineitemDiscountPerUnit = 0.0;
+            }
+
+            $grossAmount = $quantity * $unitPrice;
+            if ($lineitemDiscountPerUnit > $unitPrice) {
+                $lineitemDiscountPerUnit = $unitPrice;
+            }
+            $lineitemDiscount = $lineitemDiscountPerUnit * $quantity;
+            if ($lineitemDiscount > $grossAmount) {
+                $lineitemDiscount = $grossAmount;
+            }
+            $amount = $grossAmount - $lineitemDiscount;
+
+            $insertStmt->bind_param(
+                'sssidssddddsssdd',
+                $orderNo,
+                $customerCode,
+                $deliveryInstruction,
+                $lineItemNumber,
+                $quantity,
+                $productCode,
+                $productDescription,
+                $lineitemDiscount,
+                $discount,
+                $unitPrice,
+                $amount,
+                $dateDelivery,
+                $timeDelivery,
+                $printedAt,
+                $amountReceived,
+                $amountChange
+            );
+
+            if (!$insertStmt->execute()) {
+                if (is_pos_duplicate_key_error($insertStmt, $mysqli)) {
+                    $duplicateOrderNo = true;
+                    break;
+                }
+                $errorDetail = $insertStmt->error ? $insertStmt->error : $mysqli->error;
+                $mysqli->rollback();
+                $insertStmt->close();
+                send_pos_json_response(['success' => false, 'message' => 'Unable to save order line items. ' . $errorDetail], 500);
+            }
+        }
+
+        if ($duplicateOrderNo) {
             $mysqli->rollback();
-            send_pos_json_response(['success' => false, 'message' => 'Invalid line item data.'], 422);
+            $orderNo = '';
+            $attempt++;
+            continue;
         }
 
-        $productCode = trim((string)(isset($item['product_code']) ? $item['product_code'] : ''));
-        $productDescription = trim((string)(isset($item['product_description']) ? $item['product_description'] : ''));
-        $quantity = isset($item['quantity']) ? (float)$item['quantity'] : 0.0;
-        $unitPrice = isset($item['unit_price']) ? (float)$item['unit_price'] : 0.0;
-        $lineitemDiscountPerUnit = isset($item['lineitem_discount']) ? (float)$item['lineitem_discount'] : 0.0;
-
-        if ($productCode === '' || $productDescription === '' || $quantity <= 0) {
-            $mysqli->rollback();
-            send_pos_json_response(['success' => false, 'message' => 'Line items must include product and quantity.'], 422);
-        }
-
-        if ($lineitemDiscountPerUnit < 0) {
-            $lineitemDiscountPerUnit = 0.0;
-        }
-
-        $grossAmount = $quantity * $unitPrice;
-        if ($lineitemDiscountPerUnit > $unitPrice) {
-            $lineitemDiscountPerUnit = $unitPrice;
-        }
-        $lineitemDiscount = $lineitemDiscountPerUnit * $quantity;
-        if ($lineitemDiscount > $grossAmount) {
-            $lineitemDiscount = $grossAmount;
-        }
-        $amount = $grossAmount - $lineitemDiscount;
-
-        $insertStmt->bind_param(
-            'sssidssddddss',
-            $orderNo,
-            $customerCode,
-            $deliveryInstruction,
-            $lineItemNumber,
-            $quantity,
-            $productCode,
-            $productDescription,
-            $lineitemDiscount,
-            $discount,
-            $unitPrice,
-            $amount,
-            $dateDelivery,
-            $timeDelivery
-        );
-
-        if (!$insertStmt->execute()) {
-            $errorDetail = $insertStmt->error ? $insertStmt->error : $mysqli->error;
-            $mysqli->rollback();
-            send_pos_json_response(['success' => false, 'message' => 'Unable to save order line items. ' . $errorDetail], 500);
-        }
+        $mysqli->commit();
+        $insertStmt->close();
+        send_pos_json_response(['success' => true, 'order_no' => $orderNo]);
     }
 
-    $mysqli->commit();
-    send_pos_json_response(['success' => true, 'order_no' => $orderNo]);
+    $insertStmt->close();
+    send_pos_json_response(['success' => false, 'message' => 'Unable to save order after retrying.'], 500);
 }
 
 $customers = [];
@@ -192,6 +273,203 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
 <?php ob_start(); ?>
 
 <link href="<?php echo $baseUrl; ?>/assets/css/pos_terminal.css" rel="stylesheet">
+<style>
+    .pos-modal-open {
+        overflow: hidden;
+    }
+
+    .pos-preview-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 1055;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .pos-preview-modal.d-none {
+        display: none;
+    }
+
+    .pos-preview-backdrop {
+        position: absolute;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.55);
+    }
+
+    .pos-preview-dialog {
+        position: relative;
+        background: #fff;
+        width: min(900px, 94vw);
+        max-height: 92vh;
+        border-radius: 16px;
+        box-shadow: 0 24px 60px rgba(15, 23, 42, 0.35);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        z-index: 1;
+    }
+
+    .pos-preview-header,
+    .pos-preview-footer {
+        padding: 12px 20px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        border-bottom: 1px solid #e5e7eb;
+    }
+
+    .pos-preview-footer {
+        border-top: 1px solid #e5e7eb;
+        border-bottom: none;
+        justify-content: flex-end;
+        background: #f8fafc;
+    }
+
+    .pos-preview-body {
+        padding: 16px;
+        overflow-y: auto;
+        background: #f1f5f9;
+    }
+
+    .pos-receipt {
+        width: 76mm;
+        max-width: 76mm;
+        margin: 0 auto 16px;
+        padding: 10px 12px;
+        border: 1px dashed #94a3b8;
+        background: #fff;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 11px;
+        color: #0f172a;
+    }
+
+    .pos-receipt-text {
+        white-space: pre;
+        margin: 0;
+        font-size: 11px;
+        line-height: 1.35;
+    }
+
+    .pos-receipt:last-child {
+        margin-bottom: 0;
+    }
+
+    .pos-receipt-title {
+        font-weight: 700;
+        text-transform: uppercase;
+        font-size: 12px;
+        letter-spacing: 0.4px;
+    }
+
+    .pos-receipt-header {
+        text-align: center;
+        margin-bottom: 8px;
+    }
+
+    .pos-receipt-subtitle {
+        font-weight: 700;
+        margin-top: 4px;
+    }
+
+    .pos-receipt-meta {
+        margin-top: 4px;
+    }
+
+    .pos-receipt-section {
+        margin-top: 8px;
+    }
+
+    .pos-receipt-line {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+    }
+
+    .pos-receipt-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 6px;
+        font-size: 10px;
+    }
+
+    .pos-receipt-table th,
+    .pos-receipt-table td {
+        padding: 3px 0;
+        border-bottom: 1px dashed #cbd5e1;
+    }
+
+    .pos-receipt-table th {
+        text-align: left;
+        font-weight: 700;
+    }
+
+    .pos-receipt-table td:last-child,
+    .pos-receipt-table th:last-child {
+        text-align: right;
+    }
+
+    .pos-receipt-copy {
+        margin-top: 10px;
+        text-align: center;
+        font-weight: 700;
+        letter-spacing: 0.6px;
+    }
+
+    .pos-receipt-spacer {
+        width: 76mm;
+        max-width: 76mm;
+        margin: 0 auto 16px;
+        height: 12px;
+    }
+
+    .pos-print-area {
+        position: absolute;
+        left: -9999px;
+        top: 0;
+    }
+
+    @media print {
+        @page {
+            size: 76mm auto;
+            margin: 0;
+        }
+
+        html,
+        body {
+            margin: 0;
+            padding: 0;
+        }
+
+        body * {
+            visibility: hidden;
+        }
+
+        #pos-print-area,
+        #pos-print-area * {
+            visibility: visible;
+        }
+
+        #pos-print-area {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 76mm;
+        }
+
+        .pos-receipt {
+            border: none;
+            margin: 0;
+            padding: 0;
+        }
+
+        .pos-receipt-spacer {
+            display: none;
+            margin: 0;
+        }
+    }
+</style>
 
 <?php $styles = ob_get_clean(); ?>
 <!-- This code is useful for internal styles  -->
@@ -444,11 +722,23 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                                             <span class="fw-semibold">Additional Charges:</span>
                                             <span class="fw-semibold" id="pos-additional-charges">PHP 0.00</span>
                                         </div>
-                                        <div class="pos-terminal-summary-row pos-terminal-grand">
-                                            <span>Grand Total:</span>
-                                            <span id="pos-grand-total">PHP 0.00</span>
-                                        </div>
+                                    <div class="pos-terminal-summary-row pos-terminal-grand">
+                                        <span>Grand Total:</span>
+                                        <span id="pos-grand-total">PHP 0.00</span>
                                     </div>
+                                    <div class="pos-terminal-summary-row">
+                                        <span class="fw-semibold">Cash Amount Due:</span>
+                                        <span class="fw-semibold" id="pos-amount-due">PHP 0.00</span>
+                                    </div>
+                                    <div class="pos-terminal-summary-row">
+                                        <span class="fw-semibold">Amount Received:</span>
+                                        <input type="number" class="form-control pos-terminal-cash-input" id="pos-amount-received" value="0" min="0" step="0.01" disabled>
+                                    </div>
+                                    <div class="pos-terminal-summary-row">
+                                        <span class="fw-semibold">Change:</span>
+                                        <span class="fw-semibold" id="pos-change">PHP 0.00</span>
+                                    </div>
+                                </div>
 
                                     <div class="text-center mt-4">
                                         <button type="button" class="btn btn-primary btn-lg px-5" id="pos-submit-order" disabled>Submit Order</button>
@@ -460,6 +750,27 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                     <!-- End::row -->
 
                 </div>
+
+                <div class="pos-preview-modal d-none" id="pos-preview-modal" aria-hidden="true">
+                    <div class="pos-preview-backdrop" data-pos-preview-close="true"></div>
+                    <div class="pos-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="pos-preview-title">
+                        <div class="pos-preview-header">
+                            <h5 class="mb-0" id="pos-preview-title">Receipt Preview</h5>
+                            <button type="button" class="btn btn-link text-muted" id="pos-preview-close" aria-label="Close">
+                                <i class="ri-close-line"></i>
+                            </button>
+                        </div>
+                        <div class="pos-preview-body">
+                            <div id="pos-receipt-preview"></div>
+                        </div>
+                        <div class="pos-preview-footer">
+                            <button type="button" class="btn btn-light" id="pos-preview-cancel">Cancel</button>
+                            <button type="button" class="btn btn-outline-primary" id="pos-preview-print-store">Print Store Copy</button>
+                            <button type="button" class="btn btn-primary" id="pos-preview-print-customer">Print Customer Copy</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="pos-print-area" class="pos-print-area" aria-hidden="true"></div>
 
 <?php $content = ob_get_clean(); ?>
 <!-- This code is useful for content -->
@@ -541,6 +852,9 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                     if (discountInput) {
                         discountInput.disabled = !enabled;
                     }
+                    if (amountReceivedInput) {
+                        amountReceivedInput.disabled = !enabled;
+                    }
 
                     updateDeliveryVisibility();
                     updateSubmitEnabled();
@@ -571,11 +885,28 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                 var discountInput = document.getElementById('pos-discount');
                 var additionalChargesEl = document.getElementById('pos-additional-charges');
                 var grandTotalEl = document.getElementById('pos-grand-total');
+                var amountDueEl = document.getElementById('pos-amount-due');
+                var amountReceivedInput = document.getElementById('pos-amount-received');
+                var changeEl = document.getElementById('pos-change');
                 var submitButton = document.getElementById('pos-submit-order');
                 var dateDeliveryInput = document.getElementById('date_delivery');
                 var timeDeliveryInput = document.getElementById('time_deliver');
                 var deliveryInstructionInput = document.getElementById('delivery_instruction');
                 var lineItems = [];
+                var previewModal = document.getElementById('pos-preview-modal');
+                var previewReceipt = document.getElementById('pos-receipt-preview');
+                var previewCloseButton = document.getElementById('pos-preview-close');
+                var previewCancelButton = document.getElementById('pos-preview-cancel');
+                var previewPrintStoreButton = document.getElementById('pos-preview-print-store');
+                var previewPrintCustomerButton = document.getElementById('pos-preview-print-customer');
+                var printArea = document.getElementById('pos-print-area');
+                var previewBusy = false;
+                var reservedOrderNo = '';
+                var reservingOrderNo = false;
+                var savedOrderNo = '';
+                var savedPrintedAt = '';
+                var orderSaved = false;
+                var savedPaymentSummary = null;
 
                 if (customerSelect) {
                     customerSelect.addEventListener('change', function () {
@@ -603,6 +934,364 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                         amount = 0;
                     }
                     return 'PHP ' + amount.toFixed(2);
+                }
+
+                function getAmountReceivedValue() {
+                    if (!amountReceivedInput) {
+                        return 0;
+                    }
+                    var received = parseFloat(amountReceivedInput.value || '0');
+                    if (Number.isNaN(received) || received < 0) {
+                        received = 0;
+                    }
+                    return received;
+                }
+
+                function getPaymentSummary(totals) {
+                    var amountDue = totals ? totals.grandTotal : 0;
+                    var amountReceived = getAmountReceivedValue();
+                    var change = amountReceived - amountDue;
+                    if (change < 0) {
+                        change = 0;
+                    }
+                    return {
+                        amountDue: amountDue,
+                        amountReceived: amountReceived,
+                        change: change
+                    };
+                }
+
+                function escapeHtml(value) {
+                    return String(value || '')
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;')
+                        .replace(/'/g, '&#39;');
+                }
+
+                function formatQty(value) {
+                    var qty = Number(value);
+                    if (Number.isNaN(qty)) {
+                        return '0';
+                    }
+                    return Number.isInteger(qty) ? String(qty) : qty.toFixed(2);
+                }
+
+                function formatTimestamp(dateObj) {
+                    function pad2(value) {
+                        return String(value).padStart(2, '0');
+                    }
+
+                    return dateObj.getFullYear() + '-' + pad2(dateObj.getMonth() + 1) + '-' + pad2(dateObj.getDate())
+                        + ' ' + pad2(dateObj.getHours()) + ':' + pad2(dateObj.getMinutes()) + ':' + pad2(dateObj.getSeconds());
+                }
+
+                function calculateReceiptTotals() {
+                    var subtotal = lineItems.reduce(function (sum, item) {
+                        return sum + item.grossAmount;
+                    }, 0);
+
+                    var lineItemDiscountTotal = lineItems.reduce(function (sum, item) {
+                        return sum + item.lineDiscount;
+                    }, 0);
+
+                    var discountPercent = discountInput ? parseFloat(discountInput.value || '0') : 0;
+                    if (Number.isNaN(discountPercent) || discountPercent < 0) {
+                        discountPercent = 0;
+                    }
+                    if (discountPercent > 100) {
+                        discountPercent = 100;
+                    }
+
+                    var discountedBase = subtotal - lineItemDiscountTotal;
+                    if (discountedBase < 0) {
+                        discountedBase = 0;
+                    }
+                    var discountAmount = discountedBase * (discountPercent / 100);
+                    var additionalCharges = 0;
+                    var grandTotal = subtotal - lineItemDiscountTotal - discountAmount + additionalCharges;
+
+                    return {
+                        subtotal: subtotal,
+                        lineItemDiscountTotal: lineItemDiscountTotal,
+                        discountPercent: discountPercent,
+                        discountAmount: discountAmount,
+                        additionalCharges: additionalCharges,
+                        grandTotal: grandTotal
+                    };
+                }
+
+                var receiptTextWidth = 48;
+
+                function repeatChar(char, count) {
+                    return new Array(count + 1).join(char);
+                }
+
+                function padRight(value, width) {
+                    var text = String(value || '');
+                    if (text.length >= width) {
+                        return text.slice(0, width);
+                    }
+                    return text + repeatChar(' ', width - text.length);
+                }
+
+                function padLeft(value, width) {
+                    var text = String(value || '');
+                    if (text.length >= width) {
+                        return text.slice(text.length - width);
+                    }
+                    return repeatChar(' ', width - text.length) + text;
+                }
+
+                function centerText(value, width) {
+                    var text = String(value || '');
+                    if (text.length >= width) {
+                        return text.slice(0, width);
+                    }
+                    var padding = width - text.length;
+                    var left = Math.floor(padding / 2);
+                    var right = padding - left;
+                    return repeatChar(' ', left) + text + repeatChar(' ', right);
+                }
+
+                function wrapText(value, width) {
+                    var text = String(value || '').trim();
+                    if (!text) {
+                        return [''];
+                    }
+                    var words = text.split(/\s+/);
+                    var lines = [];
+                    var current = '';
+
+                    words.forEach(function (word) {
+                        if (word.length > width) {
+                            if (current) {
+                                lines.push(current);
+                                current = '';
+                            }
+                            for (var i = 0; i < word.length; i += width) {
+                                lines.push(word.slice(i, i + width));
+                            }
+                            return;
+                        }
+
+                        if (!current) {
+                            current = word;
+                            return;
+                        }
+
+                        if (current.length + 1 + word.length <= width) {
+                            current += ' ' + word;
+                        } else {
+                            lines.push(current);
+                            current = word;
+                        }
+                    });
+
+                    if (current) {
+                        lines.push(current);
+                    }
+
+                    return lines.length ? lines : [''];
+                }
+
+                function pushWrapped(lines, value, width) {
+                    wrapText(value, width).forEach(function (line) {
+                        lines.push(line);
+                    });
+                }
+
+                function buildReceiptText(orderNo, printedAtText, copyLabel, paymentSummary) {
+                    var storeName = storeNameInput ? storeNameInput.value.trim() : '';
+                    var storeAddress = storeAddressInput ? storeAddressInput.value.trim() : '';
+                    var customerCode = getCustomerCode();
+                    var orderType = getOrderType();
+                    var deliveryDate = dateDeliveryInput ? dateDeliveryInput.value : '';
+                    var deliveryTime = timeDeliveryInput ? timeDeliveryInput.value : '';
+                    var instruction = deliveryInstructionInput ? deliveryInstructionInput.value.trim() : '';
+                    var totals = calculateReceiptTotals();
+                    var payment = paymentSummary || getPaymentSummary(totals);
+                    var drNumber = orderNo ? 'DR' + orderNo : 'DR-PENDING';
+                    var printedLabel = printedAtText || 'PENDING PRINT';
+                    var width = receiptTextWidth;
+                    var amountWidth = 12;
+                    var qtyWidth = 6;
+                    var uomWidth = 6;
+                    var descWidth = width - qtyWidth - uomWidth - amountWidth;
+                    var lines = [];
+
+                    lines.push(centerText('COLDDUST BENTEL ICE MANUFACTURING', width));
+                    lines.push(centerText('DELIVERY RECEIPT', width));
+                    lines.push(centerText('DATE/TIME: ' + printedLabel, width));
+                    lines.push(centerText(drNumber, width));
+                    lines.push('');
+
+                    if (storeName) {
+                        pushWrapped(lines, storeName, width);
+                    }
+                    if (storeAddress) {
+                        pushWrapped(lines, storeAddress, width);
+                    }
+                    if (customerCode) {
+                        pushWrapped(lines, 'Customer Code: ' + customerCode, width);
+                    }
+
+                    if (orderType) {
+                        var orderLabel = orderType === 'delivery' ? 'Delivery' : 'Store Pickup';
+                        pushWrapped(lines, 'Order Type: ' + orderLabel, width);
+                    }
+
+                    if (orderType === 'delivery' && (deliveryDate || deliveryTime || instruction)) {
+                        if (deliveryDate || deliveryTime) {
+                            var schedule = deliveryDate;
+                            if (deliveryTime) {
+                                schedule = schedule ? (schedule + ' ' + deliveryTime) : deliveryTime;
+                            }
+                            pushWrapped(lines, 'Delivery: ' + schedule, width);
+                        }
+                        if (instruction) {
+                            pushWrapped(lines, 'Instruction: ' + instruction, width);
+                        }
+                    }
+
+                    lines.push(padRight('Description', descWidth) + padLeft('UOM', uomWidth) + padLeft('Qty', qtyWidth) + padLeft('Amount', amountWidth));
+                    lines.push('');
+
+                    var totalQty = lineItems.reduce(function (sum, item) {
+                        return sum + Number(item.qty || 0);
+                    }, 0);
+
+                    lineItems.forEach(function (item) {
+                        var qtyLabel = formatQty(item.qty);
+                        var qtyText = padLeft(qtyLabel, qtyWidth);
+                        var uomText = padLeft(item.uom || '', uomWidth);
+                        var amountText = padLeft(formatCurrency(item.amount), amountWidth);
+                        var descLines = wrapText(item.description, descWidth);
+
+                        descLines.forEach(function (descLine, index) {
+                            if (index === 0) {
+                                lines.push(padRight(descLine, descWidth) + uomText + qtyText + amountText);
+                            } else {
+                                lines.push(padRight(descLine, descWidth) + padLeft('', uomWidth) + padLeft('', qtyWidth) + padLeft('', amountWidth));
+                            }
+                        });
+                    });
+
+                    lines.push(padRight('Total Qty', descWidth + uomWidth) + padLeft(formatQty(totalQty), qtyWidth) + padLeft('', amountWidth));
+                    lines.push(padRight('Subtotal', width - amountWidth) + padLeft(formatCurrency(totals.subtotal), amountWidth));
+                    lines.push(padRight('Line Discount', width - amountWidth) + padLeft(formatCurrency(totals.lineItemDiscountTotal), amountWidth));
+                    lines.push(padRight('Discount (' + totals.discountPercent.toFixed(2) + '%)', width - amountWidth) + padLeft(formatCurrency(totals.discountAmount), amountWidth));
+                    lines.push(padRight('Grand Total', width - amountWidth) + padLeft(formatCurrency(totals.grandTotal), amountWidth));
+                    lines.push(padRight('Cash Amount Due', width - amountWidth) + padLeft(formatCurrency(payment.amountDue), amountWidth));
+                    lines.push(padRight('Amount Received', width - amountWidth) + padLeft(formatCurrency(payment.amountReceived), amountWidth));
+                    lines.push(padRight('Change', width - amountWidth) + padLeft(formatCurrency(payment.change), amountWidth));
+                    lines.push(centerText(copyLabel, width));
+
+                    while (lines.length && String(lines[lines.length - 1]).trim() === '') {
+                        lines.pop();
+                    }
+
+                    return lines.join('\n');
+                }
+
+                function renderReceiptCopies(orderNo, printedAtText, paymentSummary) {
+                    if (!previewReceipt || !printArea) {
+                        return;
+                    }
+                    var storeText = buildReceiptText(orderNo, printedAtText, 'STORE COPY', paymentSummary);
+                    var customerText = buildReceiptText(orderNo, printedAtText, 'CUSTOMER COPY', paymentSummary);
+                    var html = '<div class="pos-receipt"><pre class="pos-receipt-text">' + escapeHtml(storeText) + '</pre></div>'
+                        + '<div class="pos-receipt-spacer"></div>'
+                        + '<div class="pos-receipt"><pre class="pos-receipt-text">' + escapeHtml(customerText) + '</pre></div>';
+                    previewReceipt.innerHTML = html;
+                }
+
+                function renderPrintCopy(copyLabel, orderNo, printedAtText, paymentSummary) {
+                    if (!printArea) {
+                        return;
+                    }
+                    var copyText = buildReceiptText(orderNo, printedAtText, copyLabel, paymentSummary);
+                    printArea.innerHTML = '<div class="pos-receipt"><pre class="pos-receipt-text">' + escapeHtml(copyText) + '</pre></div>';
+                }
+
+                function updatePrintButtons() {
+                    if (previewPrintStoreButton) {
+                        var storeLabel = orderSaved ? 'Reprint Store Copy' : 'Print Store Copy';
+                        if (previewBusy && !orderSaved) {
+                            storeLabel = 'Saving...';
+                        } else if (previewBusy && orderSaved) {
+                            storeLabel = 'Printing...';
+                        }
+                        previewPrintStoreButton.textContent = storeLabel;
+                        previewPrintStoreButton.disabled = previewBusy;
+                    }
+                    if (previewPrintCustomerButton) {
+                        previewPrintCustomerButton.disabled = !orderSaved || previewBusy;
+                    }
+                }
+
+                function requestReservedOrderNo() {
+                    if (reservingOrderNo || reservedOrderNo) {
+                        if (reservedOrderNo) {
+                            renderReceiptCopies(reservedOrderNo, '');
+                        }
+                        return;
+                    }
+
+                    reservingOrderNo = true;
+                    fetch(window.location.href, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ action: 'reserve_order_no' })
+                    })
+                        .then(function (response) {
+                            return response.json().then(function (data) {
+                                return {
+                                    ok: response.ok,
+                                    data: data
+                                };
+                            });
+                        })
+                        .then(function (result) {
+                            if (!result.ok || !result.data || !result.data.success) {
+                                var message = result.data && result.data.message ? result.data.message : 'Unable to reserve order number.';
+                                throw new Error(message);
+                            }
+                            reservedOrderNo = result.data.order_no || '';
+                            if (reservedOrderNo) {
+                                renderReceiptCopies(reservedOrderNo, '');
+                            }
+                        })
+                        .catch(function (error) {
+                            window.alert(error && error.message ? error.message : 'Unable to reserve order number.');
+                        })
+                        .then(function () {
+                            reservingOrderNo = false;
+                        });
+                }
+
+                function openPreviewModal() {
+                    if (!previewModal) {
+                        return;
+                    }
+                    renderReceiptCopies(reservedOrderNo, '', savedPaymentSummary);
+                    previewModal.classList.remove('d-none');
+                    previewModal.setAttribute('aria-hidden', 'false');
+                    document.body.classList.add('pos-modal-open');
+                    updatePrintButtons();
+                    requestReservedOrderNo();
+                }
+
+                function closePreviewModal(forceClose) {
+                    if (!previewModal || (previewBusy && !forceClose)) {
+                        return;
+                    }
+                    previewModal.classList.add('d-none');
+                    previewModal.setAttribute('aria-hidden', 'true');
+                    document.body.classList.remove('pos-modal-open');
                 }
 
                 function getSelectedProduct() {
@@ -655,6 +1344,11 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                     var discountAmount = discountedBase * (discountPercent / 100);
                     var additionalCharges = 0;
                     var grandTotal = subtotal - lineItemDiscountTotal - discountAmount + additionalCharges;
+                    var amountReceived = getAmountReceivedValue();
+                    var changeAmount = amountReceived - grandTotal;
+                    if (changeAmount < 0) {
+                        changeAmount = 0;
+                    }
 
                     if (subtotalEl) {
                         subtotalEl.textContent = formatCurrency(subtotal);
@@ -667,6 +1361,12 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                     }
                     if (grandTotalEl) {
                         grandTotalEl.textContent = formatCurrency(grandTotal);
+                    }
+                    if (amountDueEl) {
+                        amountDueEl.textContent = formatCurrency(grandTotal);
+                    }
+                    if (changeEl) {
+                        changeEl.textContent = formatCurrency(changeAmount);
                     }
                 }
 
@@ -739,6 +1439,10 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
 
                 if (discountInput) {
                     discountInput.addEventListener('input', updateTotals);
+                }
+
+                if (amountReceivedInput) {
+                    amountReceivedInput.addEventListener('input', updateTotals);
                 }
 
                 if (addButton) {
@@ -817,13 +1521,16 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                     return option && option.dataset ? (option.dataset.code || '') : '';
                 }
 
-                function buildOrderPayload() {
+                function buildOrderPayload(printedAtText, orderNo, paymentSummary) {
                     var discountValue = discountInput ? parseFloat(discountInput.value || '0') : 0;
                     if (Number.isNaN(discountValue)) {
                         discountValue = 0;
                     }
+                    var totals = calculateReceiptTotals();
+                    var payment = paymentSummary || getPaymentSummary(totals);
 
                     return {
+                        order_no: orderNo || '',
                         customer_id: customerSelect ? customerSelect.value : '',
                         customer_code: getCustomerCode(),
                         order_type: getOrderType(),
@@ -839,12 +1546,25 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                                 unit_price: item.unitPrice,
                                 lineitem_discount: item.unitDiscount
                             };
-                        })
+                        }),
+                        printed_at: printedAtText || '',
+                        amt_received: payment.amountReceived,
+                        amt_change: payment.change
                     };
                 }
 
                 function resetOrderForm() {
                     lineItems = [];
+                    reservedOrderNo = '';
+                    savedOrderNo = '';
+                    savedPrintedAt = '';
+                    orderSaved = false;
+                    previewBusy = false;
+                    savedPaymentSummary = null;
+                    if (amountReceivedInput) {
+                        amountReceivedInput.value = '0';
+                    }
+                    updatePrintButtons();
                     if (lineItemsBody) {
                         lineItemsBody.innerHTML = '';
                     }
@@ -877,11 +1597,65 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                             window.alert('Add at least one item before submitting.');
                             return;
                         }
+                        openPreviewModal();
+                    });
+                }
 
-                        var payload = buildOrderPayload();
-                        var originalText = submitButton.textContent;
-                        submitButton.disabled = true;
-                        submitButton.textContent = 'Submitting...';
+                if (previewCloseButton) {
+                    previewCloseButton.addEventListener('click', closePreviewModal);
+                }
+
+                if (previewCancelButton) {
+                    previewCancelButton.addEventListener('click', closePreviewModal);
+                }
+
+                if (previewModal) {
+                    previewModal.addEventListener('click', function (event) {
+                        if (event.target && event.target.classList.contains('pos-preview-backdrop')) {
+                            closePreviewModal();
+                        }
+                    });
+                }
+
+                document.addEventListener('keydown', function (event) {
+                    if (event.key === 'Escape' && previewModal && !previewModal.classList.contains('d-none')) {
+                        closePreviewModal();
+                    }
+                });
+
+                if (previewPrintStoreButton) {
+                    previewPrintStoreButton.addEventListener('click', function () {
+                        if (previewBusy) {
+                            return;
+                        }
+
+                        if (!isCustomerSelected()) {
+                            window.alert('Select a customer before printing.');
+                            return;
+                        }
+
+                        if (lineItems.length === 0) {
+                            window.alert('Add at least one item before printing.');
+                            return;
+                        }
+
+                        if (orderSaved) {
+                            previewBusy = true;
+                            updatePrintButtons();
+                            renderPrintCopy('STORE COPY', savedOrderNo, savedPrintedAt, savedPaymentSummary);
+                            window.print();
+                            previewBusy = false;
+                            updatePrintButtons();
+                            return;
+                        }
+
+                        var printedAtText = formatTimestamp(new Date());
+                        var totals = calculateReceiptTotals();
+                        var paymentSummary = getPaymentSummary(totals);
+                        var payload = buildOrderPayload(printedAtText, reservedOrderNo, paymentSummary);
+
+                        previewBusy = true;
+                        updatePrintButtons();
 
                         fetch(window.location.href, {
                             method: 'POST',
@@ -904,16 +1678,43 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                                     throw new Error(message);
                                 }
 
-                                window.alert('Order submitted. Order no: ' + result.data.order_no);
-                                resetOrderForm();
+                                savedOrderNo = result.data.order_no || reservedOrderNo;
+                                savedPrintedAt = printedAtText;
+                                savedPaymentSummary = paymentSummary;
+                                orderSaved = true;
+                                renderReceiptCopies(savedOrderNo, savedPrintedAt, savedPaymentSummary);
+                                renderPrintCopy('STORE COPY', savedOrderNo, savedPrintedAt, savedPaymentSummary);
+                                window.print();
                             })
                             .catch(function (error) {
                                 window.alert(error && error.message ? error.message : 'Unable to submit order.');
                             })
                             .then(function () {
-                                submitButton.textContent = originalText;
-                                updateSubmitEnabled();
+                                previewBusy = false;
+                                updatePrintButtons();
                             });
+                    });
+                }
+
+                if (previewPrintCustomerButton) {
+                    previewPrintCustomerButton.addEventListener('click', function () {
+                        if (previewBusy) {
+                            return;
+                        }
+
+                        if (!orderSaved) {
+                            window.alert('Print the store copy first.');
+                            return;
+                        }
+
+                        previewBusy = true;
+                        updatePrintButtons();
+                        renderPrintCopy('CUSTOMER COPY', savedOrderNo, savedPrintedAt, savedPaymentSummary);
+                        window.print();
+                        previewBusy = false;
+                        updatePrintButtons();
+                        resetOrderForm();
+                        closePreviewModal(true);
                     });
                 }
             });
