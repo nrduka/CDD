@@ -334,8 +334,8 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
     }
 
     .pos-receipt {
-        width: 76mm;
-        max-width: 76mm;
+        width: 80mm;
+        max-width: 80mm;
         margin: 0 auto 16px;
         padding: 10px 12px;
         border: 1px dashed #94a3b8;
@@ -418,8 +418,8 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
     }
 
     .pos-receipt-spacer {
-        width: 76mm;
-        max-width: 76mm;
+        width: 80mm;
+        max-width: 80mm;
         margin: 0 auto 16px;
         height: 12px;
     }
@@ -432,7 +432,7 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
 
     @media print {
         @page {
-            size: 76mm auto;
+            size: 80mm auto;
             margin: 0;
         }
 
@@ -455,7 +455,7 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
             position: absolute;
             left: 0;
             top: 0;
-            width: 76mm;
+            width: 80mm;
         }
 
         .pos-receipt {
