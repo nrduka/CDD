@@ -28,6 +28,25 @@
     padding: 1.75rem;
 }
 
+.pos-terminal-body .form-control,
+.pos-terminal-body .form-select,
+.pos-terminal-body .choices__inner {
+    border: 2px solid #dc2626 !important;
+    box-shadow: inset 0 0 0 1px rgba(220, 38, 38, 0.25);
+    background-color: #fff5f5 !important;
+    outline: 2px solid #dc2626;
+    outline-offset: -2px;
+    opacity: 1;
+}
+
+.pos-terminal-body .form-control:focus,
+.pos-terminal-body .form-select:focus,
+.pos-terminal-body .choices__inner:focus {
+    border-color: #b91c1c !important;
+    box-shadow: inset 0 0 0 1px rgba(185, 28, 28, 0.35), 0 0 0 0.2rem rgba(239, 68, 68, 0.25);
+    outline-color: #b91c1c;
+}
+
 .pos-terminal-divider {
     border-top: 1px solid #dbe3f2;
     margin: 1.5rem 0;
@@ -100,6 +119,14 @@
 
 .pos-terminal-order-type .form-check {
     margin-bottom: 0;
+    padding: 5px;
+    background-color: transparent;
+}
+
+.pos-terminal-order-note {
+    color: #dc2626;
+    font-weight: 700;
+    white-space: nowrap;
 }
 
 @media (max-width: 767.98px) {

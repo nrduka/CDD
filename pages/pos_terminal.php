@@ -561,7 +561,7 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                                             </select>
                                         </div>
                                     </div>
-
+<br>
                                     <div class="row align-items-start g-3 pos-terminal-customer-details">
                                         <div class="col-12 col-md-3 col-lg-2">
                                             <label class="form-label fw-semibold mb-0">Store Details:</label>
@@ -588,6 +588,7 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                                                     <input class="form-check-input order-type-option" type="checkbox" id="order-type-delivery" name="order_type" value="delivery" disabled>
                                                     <label class="form-check-label" for="order-type-delivery">Delivery</label>
                                                 </div>
+                                                <span class="pos-terminal-order-note">Please choose one</span>
                                             </div>
                                         </div>
                                     </div>
@@ -1137,10 +1138,10 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                     lines.push('');
 
                     if (storeName) {
-                        pushWrapped(lines, storeName, width);
+                        pushWrapped(lines, 'Customer: ' + storeName, width);
                     }
                     if (storeAddress) {
-                        pushWrapped(lines, storeAddress, width);
+                        pushWrapped(lines, 'Address: ' + storeAddress, width);
                     }
                     if (customerCode) {
                         pushWrapped(lines, 'Customer Code: ' + customerCode, width);

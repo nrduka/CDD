@@ -45,6 +45,12 @@
                                     <span class="side-menu__label">POS Terminal</span>
                                 </a>
                             </li>
+                            <li class="slide">
+                                <a href="customer_registration.php" class="side-menu__item">
+                                    <i class="bx bx-user-plus side-menu__icon"></i>
+                                    <span class="side-menu__label">Customer Registration</span>
+                                </a>
+                            </li>
                             <!-- End::slide -->
 
                             <!-- Start::slide -->
