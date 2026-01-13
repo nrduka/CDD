@@ -728,11 +728,11 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                                         <span class="fw-semibold">Cash Amount Due:</span>
                                         <span class="fw-semibold" id="pos-amount-due">PHP 0.00</span>
                                     </div>
-                                    <div class="pos-terminal-summary-row">
+                                    <div class="pos-terminal-summary-row pos-terminal-received">
                                         <span class="fw-semibold">Amount Received:</span>
                                         <input type="number" class="form-control pos-terminal-cash-input" id="pos-amount-received" value="0" min="0" step="0.01" disabled>
                                     </div>
-                                    <div class="pos-terminal-summary-row">
+                                    <div class="pos-terminal-summary-row pos-terminal-change">
                                         <span class="fw-semibold">Change:</span>
                                         <span class="fw-semibold" id="pos-change">PHP 0.00</span>
                                     </div>
@@ -1463,11 +1463,15 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                 }
 
                 if (discountInput) {
-                    discountInput.addEventListener('input', updateTotals);
+                    ['input', 'change'].forEach(function (eventName) {
+                        discountInput.addEventListener(eventName, updateTotals);
+                    });
                 }
 
                 if (amountReceivedInput) {
-                    amountReceivedInput.addEventListener('input', updateTotals);
+                    ['input', 'change'].forEach(function (eventName) {
+                        amountReceivedInput.addEventListener(eventName, updateTotals);
+                    });
                 }
 
                 if (addButton) {

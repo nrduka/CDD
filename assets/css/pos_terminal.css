@@ -86,6 +86,12 @@
     text-align: center;
 }
 
+.pos-terminal-summary {
+    width: 25%;
+    min-width: 260px;
+    font-size: 1.2rem;
+}
+
 .pos-terminal-summary-row {
     display: flex;
     align-items: center;
@@ -101,11 +107,43 @@
 
 .pos-terminal-discount {
     max-width: 140px;
+    margin-left: auto;
+    justify-content: flex-end;
+}
+
+.pos-terminal-discount .form-control {
+    text-align: right;
+}
+
+.pos-terminal-cash-input {
+    max-width: 220px;
+    margin-left: auto;
+    text-align: right;
+}
+
+.pos-terminal-summary .form-control,
+.pos-terminal-summary .input-group-text {
+    font-size: 1.2rem;
 }
 
 .pos-terminal-grand span {
     font-size: 1.2rem;
     font-weight: 700;
+}
+
+#pos-change {
+    background: #fef08a;
+    border-radius: 0.35rem;
+    padding: 0.15rem 0.45rem;
+}
+
+.pos-terminal-received span,
+.pos-terminal-change span {
+    font-size: 1.2rem;
+}
+
+.pos-terminal-received .pos-terminal-cash-input {
+    font-size: 1.2rem;
 }
 
 
@@ -130,6 +168,17 @@
 }
 
 @media (max-width: 767.98px) {
+    .pos-terminal-summary {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .pos-terminal-discount,
+    .pos-terminal-cash-input {
+        max-width: 100%;
+        width: 100%;
+    }
+
     .pos-terminal-summary-row {
         flex-direction: column;
         align-items: flex-start;
