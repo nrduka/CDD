@@ -350,6 +350,7 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
         margin: 0;
         font-size: 11px;
         line-height: 1.35;
+        font-weight: 600;
     }
 
     .pos-receipt:last-child {
@@ -541,17 +542,12 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                                                                 $displayName = $code;
                                                             }
 
-                                                            $detailParts = [];
-                                                            if ($code !== '' && $displayName !== $code) {
-                                                                $detailParts[] = $code;
-                                                            }
-                                                            if ($type !== '') {
-                                                                $detailParts[] = $type;
-                                                            }
-
-                                                            $label = $displayName;
-                                                            if (!empty($detailParts)) {
-                                                                $label .= ' - ' . implode(' | ', $detailParts);
+                                                            if ($code !== '' && $displayName !== '' && $displayName !== $code) {
+                                                                $label = $code . ' | ' . $displayName;
+                                                            } elseif ($displayName !== '') {
+                                                                $label = $displayName;
+                                                            } else {
+                                                                $label = $code;
                                                             }
                                                         ?>
                                                         <option value="<?php echo htmlspecialchars((string)$customer['id'], ENT_QUOTES, 'UTF-8'); ?>"
@@ -683,6 +679,7 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                                             <table class="table table-bordered align-middle mb-0" id="pos-lineitems-table">
                                                 <thead class="table-light">
                                                     <tr>
+                                                        <th class="text-center">No</th>
                                                         <th>Product Code</th>
                                                         <th>Description</th>
                                                         <th>UOM</th>
@@ -933,7 +930,13 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                     if (Number.isNaN(amount)) {
                         amount = 0;
                     }
-                    return 'PHP ' + amount.toFixed(2);
+                    var sign = amount < 0 ? '-' : '';
+                    var fixed = Math.abs(amount).toFixed(2);
+                    var parts = fixed.split('.');
+                    var whole = parts[0];
+                    var decimal = parts[1] ? '.' + parts[1] : '';
+                    var withCommas = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+                    return 'PHP ' + sign + withCommas + decimal;
                 }
 
                 function getAmountReceivedValue() {
@@ -1115,10 +1118,16 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                     var drNumber = orderNo ? 'DR' + orderNo : 'DR-PENDING';
                     var printedLabel = printedAtText || 'PENDING PRINT';
                     var width = receiptTextWidth;
-                    var amountWidth = 12;
-                    var qtyWidth = 6;
-                    var uomWidth = 6;
-                    var descWidth = width - qtyWidth - uomWidth - amountWidth;
+                    var amountWidth = 20;
+                    var qtyWidth = 3;
+                    var uomWidth = 4;
+                    var lineWidth = 3;
+                    var amountGap = 2;
+                    var amountGapText = repeatChar(' ', amountGap);
+                    var colGap = 1;
+                    var colGapText = repeatChar(' ', colGap);
+                    var descWidth = width - lineWidth - qtyWidth - uomWidth - amountWidth - amountGap - (colGap * 2);
+                    var labelWidth = lineWidth + descWidth + uomWidth + (colGap * 2);
                     var lines = [];
 
                     lines.push(centerText('COLDDUST BENTEL ICE MANUFACTURING', width));
@@ -1155,37 +1164,38 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                         }
                     }
 
-                    lines.push(padRight('Description', descWidth) + padLeft('UOM', uomWidth) + padLeft('Qty', qtyWidth) + padLeft('Amount', amountWidth));
+                    lines.push(padRight('No', lineWidth) + padRight('Description', descWidth) + colGapText + padLeft('UOM', uomWidth) + colGapText + padLeft('Qty', qtyWidth) + amountGapText + padLeft('Amount', amountWidth));
                     lines.push('');
 
                     var totalQty = lineItems.reduce(function (sum, item) {
                         return sum + Number(item.qty || 0);
                     }, 0);
 
-                    lineItems.forEach(function (item) {
+                    lineItems.forEach(function (item, index) {
+                        var lineText = padRight(index + 1, lineWidth);
                         var qtyLabel = formatQty(item.qty);
                         var qtyText = padLeft(qtyLabel, qtyWidth);
                         var uomText = padLeft(item.uom || '', uomWidth);
                         var amountText = padLeft(formatCurrency(item.amount), amountWidth);
                         var descLines = wrapText(item.description, descWidth);
 
-                        descLines.forEach(function (descLine, index) {
-                            if (index === 0) {
-                                lines.push(padRight(descLine, descWidth) + uomText + qtyText + amountText);
+                        descLines.forEach(function (descLine, descIndex) {
+                            if (descIndex === 0) {
+                                lines.push(lineText + padRight(descLine, descWidth) + colGapText + uomText + colGapText + qtyText + amountGapText + amountText);
                             } else {
-                                lines.push(padRight(descLine, descWidth) + padLeft('', uomWidth) + padLeft('', qtyWidth) + padLeft('', amountWidth));
+                                lines.push(padRight('', lineWidth) + padRight(descLine, descWidth) + colGapText + padLeft('', uomWidth) + colGapText + padLeft('', qtyWidth) + amountGapText + padLeft('', amountWidth));
                             }
                         });
                     });
 
-                    lines.push(padRight('Total Qty', descWidth + uomWidth) + padLeft(formatQty(totalQty), qtyWidth) + padLeft('', amountWidth));
-                    lines.push(padRight('Subtotal', width - amountWidth) + padLeft(formatCurrency(totals.subtotal), amountWidth));
-                    lines.push(padRight('Line Discount', width - amountWidth) + padLeft(formatCurrency(totals.lineItemDiscountTotal), amountWidth));
-                    lines.push(padRight('Discount (' + totals.discountPercent.toFixed(2) + '%)', width - amountWidth) + padLeft(formatCurrency(totals.discountAmount), amountWidth));
-                    lines.push(padRight('Grand Total', width - amountWidth) + padLeft(formatCurrency(totals.grandTotal), amountWidth));
-                    lines.push(padRight('Cash Amount Due', width - amountWidth) + padLeft(formatCurrency(payment.amountDue), amountWidth));
-                    lines.push(padRight('Amount Received', width - amountWidth) + padLeft(formatCurrency(payment.amountReceived), amountWidth));
-                    lines.push(padRight('Change', width - amountWidth) + padLeft(formatCurrency(payment.change), amountWidth));
+                    lines.push(padRight('Total Qty', labelWidth) + padLeft(formatQty(totalQty), qtyWidth) + amountGapText + padLeft('', amountWidth));
+                    lines.push(padRight('Subtotal', width - amountWidth - amountGap) + amountGapText + padLeft(formatCurrency(totals.subtotal), amountWidth));
+                    lines.push(padRight('Line Discount', width - amountWidth - amountGap) + amountGapText + padLeft(formatCurrency(totals.lineItemDiscountTotal), amountWidth));
+                    lines.push(padRight('Discount (' + totals.discountPercent.toFixed(2) + '%)', width - amountWidth - amountGap) + amountGapText + padLeft(formatCurrency(totals.discountAmount), amountWidth));
+                    lines.push(padRight('Grand Total', width - amountWidth - amountGap) + amountGapText + padLeft(formatCurrency(totals.grandTotal), amountWidth));
+                    lines.push(padRight('Cash Amount Due', width - amountWidth - amountGap) + amountGapText + padLeft(formatCurrency(payment.amountDue), amountWidth));
+                    lines.push(padRight('Amount Received', width - amountWidth - amountGap) + amountGapText + padLeft(formatCurrency(payment.amountReceived), amountWidth));
+                    lines.push(padRight('Change', width - amountWidth - amountGap) + amountGapText + padLeft(formatCurrency(payment.change), amountWidth));
                     lines.push(centerText(copyLabel, width));
 
                     while (lines.length && String(lines[lines.length - 1]).trim() === '') {
@@ -1377,12 +1387,17 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                     emptyState.classList.toggle('d-none', lineItems.length > 0);
                 }
 
-                function addLineItemRow(item) {
+                function addLineItemRow(item, lineNumber) {
                     if (!lineItemsBody) {
                         return;
                     }
 
                     var row = document.createElement('tr');
+
+                    var lineCell = document.createElement('td');
+                    lineCell.className = 'text-center';
+                    lineCell.textContent = lineNumber;
+                    row.appendChild(lineCell);
 
                     var codeCell = document.createElement('td');
                     codeCell.textContent = item.code;
@@ -1490,7 +1505,7 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                         };
 
                         lineItems.push(item);
-                        addLineItemRow(item);
+                        addLineItemRow(item, lineItems.length);
                         updateEmptyState();
                         updateTotals();
                         updateSubmitEnabled();
