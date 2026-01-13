@@ -1197,6 +1197,15 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                     lines.push(padRight('Cash Amount Due', width - amountWidth - amountGap) + amountGapText + padLeft(formatCurrency(payment.amountDue), amountWidth));
                     lines.push(padRight('Amount Received', width - amountWidth - amountGap) + amountGapText + padLeft(formatCurrency(payment.amountReceived), amountWidth));
                     lines.push(padRight('Change', width - amountWidth - amountGap) + amountGapText + padLeft(formatCurrency(payment.change), amountWidth));
+                    if (copyLabel === 'STORE COPY') {
+                        lines.push('');
+                        lines.push('');
+
+                        lines.push('RECEIVED BY: _______________________________');
+                        lines.push(centerText('        Printed Name & Signature', width));
+                        lines.push('');
+                        lines.push('');
+                    }
                     lines.push(centerText(copyLabel, width));
 
                     while (lines.length && String(lines[lines.length - 1]).trim() === '') {
