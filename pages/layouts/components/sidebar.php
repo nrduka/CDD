@@ -53,6 +53,7 @@
                             </li>
                             <!-- End::slide -->
 
+                            <?php /*
                             <!-- Start::slide -->
                             <li class="slide">
                                 <a href="patient_registration.php" class="side-menu__item">
@@ -105,6 +106,7 @@
                                 </ul>
                             </li>
                             <!-- End::slide -->
+                            */ ?>
 
                             <!-- Start::slide -->
                             <li class="slide has-sub">

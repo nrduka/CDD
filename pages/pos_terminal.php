@@ -244,7 +244,7 @@ if (!$connectionAvailable) {
     $customerError = 'Database connection unavailable.';
     $productError = 'Database connection unavailable.';
 } else {
-$query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, address, type FROM customer_register ORDER BY storeName, lastName, firstName";
+$query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, address, type FROM customer_register ORDER BY customer_source,customer_series";
     if ($result = $mysqli->query($query)) {
         while ($row = $result->fetch_assoc()) {
             $customers[] = $row;
@@ -254,7 +254,7 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
         $customerError = 'Customer list unavailable.';
     }
 
-    $query = "SELECT id, product_code, product_description, uom, unit_price FROM ice_product ORDER BY product_description, product_code";
+    $query = "SELECT id, product_code, product_description, uom, unit_price FROM ice_product ORDER BY product_code, product_type";
     if ($result = $mysqli->query($query)) {
         while ($row = $result->fetch_assoc()) {
             $products[] = $row;
