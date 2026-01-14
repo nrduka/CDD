@@ -297,7 +297,9 @@
     }
   }
   let layoutSetting = document.querySelector(".layout-setting");
-  layoutSetting.addEventListener("click", toggleTheme);
+  if (layoutSetting) {
+    layoutSetting.addEventListener("click", toggleTheme);
+  }
   /* header theme toggle */
 
   /* Choices JS */

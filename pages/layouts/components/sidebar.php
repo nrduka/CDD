@@ -117,22 +117,7 @@
                                 </a>
                                 <ul class="slide-menu child1">
                                     <li class="slide">
-                                        <a href="queue_summary.php" class="side-menu__item">Queue Summary</a>
-                                    </li>
-                                    <li class="slide">
-                                        <a href="department_queue_summary.php" class="side-menu__item">Department Queue Summary</a>
-                                    </li>
-                                    <li class="slide">
-                                        <a href="patient_service_time_report.php" class="side-menu__item">Patient Service Time Report</a>
-                                    </li>
-                                    <li class="slide">
-                                        <a href="department_service_time_report.php" class="side-menu__item">Department Service Time Report</a>
-                                    </li>
-                                    <li class="slide">
-                                        <a href="daily_sales_report.php" class="side-menu__item">Daily Sales Report</a>
-                                    </li>
-                                    <li class="slide">
-                                        <a href="todate_sales_report.php" class="side-menu__item">To-Date Sales Report</a>
+                                        <a href="daily_transaction.php" class="side-menu__item">Daily Transaction</a>
                                     </li>
                                 </ul>
                             </li>
@@ -242,3 +227,5 @@
 
             </aside>
             
+
+

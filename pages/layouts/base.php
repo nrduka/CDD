@@ -20,7 +20,7 @@ if (function_exists('date_default_timezone_set')) {
         <title>CDD BENTEL</title>
 
         <!-- FAVICON -->
-        <link rel="icon" href="<?php echo $baseUrl; ?>/assets/images/company-logos/header_icon.webp" type="image/x-icon">
+        <link rel="icon" href="<?php echo $baseUrl; ?>/assets/images/company-logos/header_icon.png" type="image/png">
 
         <!-- BOOTSTRAP CSS -->
         <link  id="style" href="<?php echo $baseUrl; ?>/assets/libs/bootstrap/css/bootstrap.min.css" rel="stylesheet">

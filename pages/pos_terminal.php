@@ -688,6 +688,7 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                                                         <th class="text-end">Unit Price</th>
                                                         <th class="text-end">Line Discount</th>
                                                         <th class="text-end">Amount</th>
+                                                        <th class="text-center">Action</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody id="pos-lineitems-body"></tbody>
@@ -1397,7 +1398,28 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                     emptyState.classList.toggle('d-none', lineItems.length > 0);
                 }
 
-                function addLineItemRow(item, lineNumber) {
+                function renderLineItems() {
+                    if (!lineItemsBody) {
+                        return;
+                    }
+                    lineItemsBody.innerHTML = '';
+                    lineItems.forEach(function (item, index) {
+                        addLineItemRow(item, index + 1, index);
+                    });
+                }
+
+                function removeLineItem(itemIndex) {
+                    if (!lineItems || itemIndex < 0 || itemIndex >= lineItems.length) {
+                        return;
+                    }
+                    lineItems.splice(itemIndex, 1);
+                    renderLineItems();
+                    updateEmptyState();
+                    updateTotals();
+                    updateSubmitEnabled();
+                }
+
+                function addLineItemRow(item, lineNumber, itemIndex) {
                     if (!lineItemsBody) {
                         return;
                     }
@@ -1440,6 +1462,19 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                     amountCell.className = 'text-end';
                     amountCell.textContent = formatCurrency(item.amount);
                     row.appendChild(amountCell);
+
+                    var actionCell = document.createElement('td');
+                    actionCell.className = 'text-center';
+                    var removeButton = document.createElement('button');
+                    removeButton.type = 'button';
+                    removeButton.className = 'btn btn-sm btn-outline-danger pos-lineitem-remove';
+                    removeButton.textContent = 'Remove';
+                    removeButton.setAttribute('aria-label', 'Remove line item');
+                    removeButton.addEventListener('click', function () {
+                        removeLineItem(itemIndex);
+                    });
+                    actionCell.appendChild(removeButton);
+                    row.appendChild(actionCell);
 
                     lineItemsBody.appendChild(row);
                 }
@@ -1519,7 +1554,7 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                         };
 
                         lineItems.push(item);
-                        addLineItemRow(item, lineItems.length);
+                        renderLineItems();
                         updateEmptyState();
                         updateTotals();
                         updateSubmitEnabled();
