@@ -254,7 +254,7 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
         $customerError = 'Customer list unavailable.';
     }
 
-    $query = "SELECT id, product_code, product_description, uom, unit_price FROM ice_product ORDER BY product_code, product_type";
+    $query = "SELECT id, product_code, product_description, uom, unit_price FROM ice_product WHERE status != 1 ORDER BY product_code, product_type";
     if ($result = $mysqli->query($query)) {
         while ($row = $result->fetch_assoc()) {
             $products[] = $row;
@@ -640,6 +640,7 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                                                             if ($description !== '') {
                                                                 $labelParts[] = $description;
                                                             }
+                                                            $labelParts[] = 'PHP ' . number_format($unitPrice, 2);
                                                             $label = implode(' - ', $labelParts);
                                                             if ($uom !== '') {
                                                                 $label .= ' (' . $uom . ')';
