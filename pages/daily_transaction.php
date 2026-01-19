@@ -276,6 +276,11 @@ ob_start();
                 <div class="col-auto">
                     <button type="submit" class="btn btn-primary">View</button>
                 </div>
+                <div class="col-auto">
+                    <a class="btn btn-outline-secondary" href="print_daily_transaction.php?date=<?php echo urlencode($reportMeta['report_date']); ?>">
+                        Export Excel
+                    </a>
+                </div>
                 <div class="col-12 text-end">
                     <span class="text-muted small">Generated: <?php echo htmlspecialchars($reportMeta['generated_at']); ?></span>
                 </div>

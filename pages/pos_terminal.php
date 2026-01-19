@@ -1,14 +1,16 @@
 <?php
+ob_start();
 // This code generates the base URL for the website by combining the protocol, domain name, and directory path.
 $rootFolder = basename($_SERVER['DOCUMENT_ROOT']);
 $baseUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https://' : 'http://') . $_SERVER['HTTP_HOST'] . str_replace('/pages', '', dirname($_SERVER['SCRIPT_NAME']));
-?>
 
-
-<?php 
-session_start();
-$role = $_SESSION['sess_userrole'];
-$fullname = $_SESSION['sess_firstname'] . " " . $_SESSION['sess_lastname'];
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+$role = isset($_SESSION['sess_userrole']) ? $_SESSION['sess_userrole'] : '';
+$firstName = isset($_SESSION['sess_firstname']) ? $_SESSION['sess_firstname'] : '';
+$lastName = isset($_SESSION['sess_lastname']) ? $_SESSION['sess_lastname'] : '';
+$fullname = trim($firstName . ' ' . $lastName);
 
 require_once __DIR__ . '/db2.php';
 
@@ -16,6 +18,9 @@ $isPosSubmission = isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD
 
 function send_pos_json_response($payload, $statusCode = 200)
 {
+    if (ob_get_length()) {
+        ob_clean();
+    }
     http_response_code($statusCode);
     header('Content-Type: application/json; charset=UTF-8');
     echo json_encode($payload);
@@ -561,7 +566,8 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                                             </select>
                                         </div>
                                     </div>
-<br>
+                                        <br>
+
                                     <div class="row align-items-start g-3 pos-terminal-customer-details">
                                         <div class="col-12 col-md-3 col-lg-2">
                                             <label class="form-label fw-semibold mb-0">Store Details:</label>

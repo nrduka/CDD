@@ -119,6 +119,9 @@
                                     <li class="slide">
                                         <a href="daily_transaction.php" class="side-menu__item">Daily Transaction</a>
                                     </li>
+                                    <li class="slide">
+                                        <a href="todate_daily_sales.php" class="side-menu__item">To-Date Daily Sales</a>
+                                    </li>
                                 </ul>
                             </li>
                             <!-- End::slide -->
