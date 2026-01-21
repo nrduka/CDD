@@ -131,8 +131,8 @@ if ($isPosSubmission) {
         $amountChange = 0.0;
     }
 
-    $insertSql = "INSERT INTO sales (order_no, customer_code, delivery_instruction, lineitem, qty, product_code, product_description, lineitem_discount, discount, unit_price, amount, date_delivery, time_delivery, date_created, amt_received, amt_change)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    $insertSql = "INSERT INTO sales (order_no, customer_code, delivery_instruction, lineitem, qty, product_code, product_description, lineitem_discount, discount, unit_price, amount, date_delivery, time_delivery, date_time_ordered, date_created, amt_received, amt_change)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
     $insertStmt = $mysqli->prepare($insertSql);
     if (!$insertStmt) {
@@ -191,7 +191,7 @@ if ($isPosSubmission) {
             $amount = $grossAmount - $lineitemDiscount;
 
             $insertStmt->bind_param(
-                'sssidssddddsssdd',
+                'sssidssddddssssdd',
                 $orderNo,
                 $customerCode,
                 $deliveryInstruction,
@@ -205,6 +205,7 @@ if ($isPosSubmission) {
                 $amount,
                 $dateDelivery,
                 $timeDelivery,
+                $printedAt,
                 $printedAt,
                 $amountReceived,
                 $amountChange

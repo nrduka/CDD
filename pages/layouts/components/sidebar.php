@@ -46,6 +46,12 @@
                                 </a>
                             </li>
                             <li class="slide">
+                                <a href="late_posting_sales.php" class="side-menu__item">
+                                    <i class="bx bx-calendar-edit side-menu__icon"></i>
+                                    <span class="side-menu__label">Late Posting Sales</span>
+                                </a>
+                            </li>
+                            <li class="slide">
                                 <a href="customer_registration.php" class="side-menu__item">
                                     <i class="bx bx-user-plus side-menu__icon"></i>
                                     <span class="side-menu__label">Customer Registration</span>
@@ -118,6 +124,9 @@
                                 <ul class="slide-menu child1">
                                     <li class="slide">
                                         <a href="daily_transaction.php" class="side-menu__item">Daily Transaction</a>
+                                    </li>
+                                    <li class="slide">
+                                        <a href="raw_sales_report.php" class="side-menu__item">Raw Sales Report</a>
                                     </li>
                                     <li class="slide">
                                         <a href="todate_daily_sales.php" class="side-menu__item">To-Date Daily Sales</a>
