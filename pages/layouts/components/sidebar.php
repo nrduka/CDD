@@ -57,6 +57,12 @@
                                     <span class="side-menu__label">Customer Registration</span>
                                 </a>
                             </li>
+                            <li class="slide">
+                                <a href="ice_production_form.php" class="side-menu__item">
+                                    <i class="bx bx-wind side-menu__icon"></i>
+                                    <span class="side-menu__label">Ice Production</span>
+                                </a>
+                            </li>
                             <!-- End::slide -->
 
                             <?php /*
