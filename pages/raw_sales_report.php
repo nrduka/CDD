@@ -33,8 +33,6 @@ $columns = [
     'sales_qty' => 'SALES QTY',
     'sales_product_code' => 'SALES PRODUCT CODE',
     'sales_product_description' => 'SALES PRODUCT DESCRIPTION',
-    'sales_lineitem_discount' => 'SALES LINEITEM DISCOUNT',
-    'sales_discount' => 'SALES DISCOUNT',
     'sales_unit_price' => 'SALES UNIT PRICE',
     'sales_amount' => 'SALES AMOUNT',
     'sales_date_delivery' => 'SALES DATE DELIVERY',
@@ -42,14 +40,11 @@ $columns = [
     'sales_date_created' => 'SALES DATE CREATED',
     'sales_amt_received' => 'SALES AMT RECEIVED',
     'sales_amt_change' => 'SALES AMT CHANGE',
-    'product_id' => 'PRODUCT ID',
     'product_code' => 'PRODUCT CODE',
     'product_description' => 'PRODUCT DESCRIPTION',
     'product_uom' => 'PRODUCT UOM',
     'product_unit_price' => 'PRODUCT UNIT PRICE',
-    'product_date_created' => 'PRODUCT DATE CREATED',
     'product_type' => 'PRODUCT TYPE',
-    'product_status' => 'PRODUCT STATUS',
     'customer_id' => 'CUSTOMER ID',
     'customer_code' => 'CUSTOMER CODE',
     'customer_first_name' => 'CUSTOMER FIRST NAME',
@@ -79,8 +74,6 @@ if (!isset($mysqli) || !$mysqli) {
                    s.qty AS sales_qty,
                    s.product_code AS sales_product_code,
                    s.product_description AS sales_product_description,
-                   s.lineitem_discount AS sales_lineitem_discount,
-                   s.discount AS sales_discount,
                    s.unit_price AS sales_unit_price,
                    s.amount AS sales_amount,
                    s.date_delivery AS sales_date_delivery,
@@ -88,14 +81,11 @@ if (!isset($mysqli) || !$mysqli) {
                    s.date_created AS sales_date_created,
                    s.amt_received AS sales_amt_received,
                    s.amt_change AS sales_amt_change,
-                   p.id AS product_id,
                    p.product_code AS product_code,
                    p.product_description AS product_description,
                    p.uom AS product_uom,
                    p.unit_price AS product_unit_price,
-                   p.date_created AS product_date_created,
                    p.product_type AS product_type,
-                   p.status AS product_status,
                    c.id AS customer_id,
                    c.customer_code AS customer_code,
                    c.firstName AS customer_first_name,
@@ -107,10 +97,11 @@ if (!isset($mysqli) || !$mysqli) {
                    c.customer_series AS customer_series,
                    c.customer_source AS customer_source,
                    c.area AS customer_area,
-                   c.sales_channel AS customer_sales_channel
+                   sc.customer_channel AS customer_sales_channel
             FROM sales s
             LEFT JOIN ice_product p ON p.product_code = s.product_code
-            LEFT JOIN customer c ON c.customer_code = s.customer_code
+            LEFT JOIN customer_register c ON c.customer_code = s.customer_code
+            LEFT JOIN source_channel sc ON sc.customer_source = c.customer_source
             WHERE DATE(s.date_created) = ?
             ORDER BY s.date_created, s.order_no, s.lineitem";
     $stmt = $mysqli->prepare($sql);

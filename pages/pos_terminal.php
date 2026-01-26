@@ -72,15 +72,6 @@ if ($isPosSubmission) {
         send_pos_json_response(['success' => false, 'message' => 'Invalid order payload.'], 400);
     }
 
-    $action = trim((string)(isset($payload['action']) ? $payload['action'] : ''));
-    if ($action === 'reserve_order_no') {
-        list($reservedOrderNo, $reserveError) = generate_pos_order_no($mysqli);
-        if ($reserveError) {
-            send_pos_json_response(['success' => false, 'message' => $reserveError], 500);
-        }
-        send_pos_json_response(['success' => true, 'order_no' => $reservedOrderNo]);
-    }
-
     $customerCode = trim((string)(isset($payload['customer_code']) ? $payload['customer_code'] : ''));
     if ($customerCode === '') {
         send_pos_json_response(['success' => false, 'message' => 'Customer is required.'], 422);
@@ -908,8 +899,6 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                 var previewPrintCustomerButton = document.getElementById('pos-preview-print-customer');
                 var printArea = document.getElementById('pos-print-area');
                 var previewBusy = false;
-                var reservedOrderNo = '';
-                var reservingOrderNo = false;
                 var savedOrderNo = '';
                 var savedPrintedAt = '';
                 var orderSaved = false;
@@ -1260,58 +1249,15 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                     }
                 }
 
-                function requestReservedOrderNo() {
-                    if (reservingOrderNo || reservedOrderNo) {
-                        if (reservedOrderNo) {
-                            renderReceiptCopies(reservedOrderNo, '');
-                        }
-                        return;
-                    }
-
-                    reservingOrderNo = true;
-                    fetch(window.location.href, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({ action: 'reserve_order_no' })
-                    })
-                        .then(function (response) {
-                            return response.json().then(function (data) {
-                                return {
-                                    ok: response.ok,
-                                    data: data
-                                };
-                            });
-                        })
-                        .then(function (result) {
-                            if (!result.ok || !result.data || !result.data.success) {
-                                var message = result.data && result.data.message ? result.data.message : 'Unable to reserve order number.';
-                                throw new Error(message);
-                            }
-                            reservedOrderNo = result.data.order_no || '';
-                            if (reservedOrderNo) {
-                                renderReceiptCopies(reservedOrderNo, '');
-                            }
-                        })
-                        .catch(function (error) {
-                            window.alert(error && error.message ? error.message : 'Unable to reserve order number.');
-                        })
-                        .then(function () {
-                            reservingOrderNo = false;
-                        });
-                }
-
                 function openPreviewModal() {
                     if (!previewModal) {
                         return;
                     }
-                    renderReceiptCopies(reservedOrderNo, '', savedPaymentSummary);
+                    renderReceiptCopies('', '', savedPaymentSummary);
                     previewModal.classList.remove('d-none');
                     previewModal.setAttribute('aria-hidden', 'false');
                     document.body.classList.add('pos-modal-open');
                     updatePrintButtons();
-                    requestReservedOrderNo();
                 }
 
                 function closePreviewModal(forceClose) {
@@ -1627,7 +1573,6 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
 
                 function resetOrderForm() {
                     lineItems = [];
-                    reservedOrderNo = '';
                     savedOrderNo = '';
                     savedPrintedAt = '';
                     orderSaved = false;
@@ -1724,7 +1669,7 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                         var printedAtText = formatTimestamp(new Date());
                         var totals = calculateReceiptTotals();
                         var paymentSummary = getPaymentSummary(totals);
-                        var payload = buildOrderPayload(printedAtText, reservedOrderNo, paymentSummary);
+                        var payload = buildOrderPayload(printedAtText, '', paymentSummary);
 
                         previewBusy = true;
                         updatePrintButtons();
@@ -1750,7 +1695,7 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                                     throw new Error(message);
                                 }
 
-                                savedOrderNo = result.data.order_no || reservedOrderNo;
+                                savedOrderNo = result.data.order_no || '';
                                 savedPrintedAt = printedAtText;
                                 savedPaymentSummary = paymentSummary;
                                 orderSaved = true;
