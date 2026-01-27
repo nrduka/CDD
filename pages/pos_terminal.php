@@ -261,6 +261,75 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
         $productError = 'Product list unavailable.';
     }
 }
+
+$prefillOrderNo = isset($_GET['void_order_no']) ? trim((string)$_GET['void_order_no']) : '';
+$prefillOrder = null;
+$prefillError = null;
+
+if ($prefillOrderNo !== '') {
+    if (!$connectionAvailable) {
+        $prefillError = 'Database connection unavailable.';
+    } else {
+        $prefillSql = "SELECT s.order_no,
+                              s.customer_code,
+                              s.delivery_instruction,
+                              s.qty,
+                              s.product_code,
+                              s.product_description,
+                              s.lineitem_discount,
+                              s.discount,
+                              s.unit_price,
+                              s.amount,
+                              s.date_delivery,
+                              s.time_delivery,
+                              p.uom
+                       FROM sales s
+                       LEFT JOIN ice_product p ON p.product_code = s.product_code
+                       WHERE s.order_no = ?
+                       ORDER BY s.lineitem";
+        $prefillStmt = $mysqli->prepare($prefillSql);
+        if (!$prefillStmt) {
+            $prefillError = 'Unable to load voided order.';
+        } else {
+            $prefillStmt->bind_param('s', $prefillOrderNo);
+            if ($prefillStmt->execute() && ($prefillResult = $prefillStmt->get_result())) {
+                while ($row = $prefillResult->fetch_assoc()) {
+                    if ($prefillOrder === null) {
+                        $deliveryInstruction = trim((string)(isset($row['delivery_instruction']) ? $row['delivery_instruction'] : ''));
+                        $dateDelivery = (string)(isset($row['date_delivery']) ? $row['date_delivery'] : '');
+                        $timeDelivery = (string)(isset($row['time_delivery']) ? $row['time_delivery'] : '');
+                        $prefillOrder = [
+                            'order_no' => $prefillOrderNo,
+                            'customer_code' => trim((string)(isset($row['customer_code']) ? $row['customer_code'] : '')),
+                            'delivery_instruction' => $deliveryInstruction,
+                            'date_delivery' => $dateDelivery,
+                            'time_delivery' => $timeDelivery,
+                            'discount' => isset($row['discount']) ? (float)$row['discount'] : 0.0,
+                            'order_type' => ($dateDelivery !== '' || $timeDelivery !== '' || $deliveryInstruction !== '') ? 'delivery' : 'store-pickup',
+                            'items' => []
+                        ];
+                    }
+
+                    $prefillOrder['items'][] = [
+                        'product_code' => (string)(isset($row['product_code']) ? $row['product_code'] : ''),
+                        'product_description' => (string)(isset($row['product_description']) ? $row['product_description'] : ''),
+                        'uom' => (string)(isset($row['uom']) ? $row['uom'] : ''),
+                        'qty' => isset($row['qty']) ? (float)$row['qty'] : 0.0,
+                        'unit_price' => isset($row['unit_price']) ? (float)$row['unit_price'] : 0.0,
+                        'lineitem_discount' => isset($row['lineitem_discount']) ? (float)$row['lineitem_discount'] : 0.0,
+                        'amount' => isset($row['amount']) ? (float)$row['amount'] : 0.0
+                    ];
+                }
+                $prefillResult->free();
+            }
+            $prefillStmt->close();
+
+            if ($prefillOrder === null) {
+                $prefillError = 'Unable to find the voided order.';
+            }
+        }
+    }
+}
 ?>
 
 
@@ -501,6 +570,15 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                                     </div>
                                 </div>
                                 <div class="card-body pos-terminal-body">
+                                    <?php if ($prefillOrderNo !== '' && $prefillOrder !== null): ?>
+                                        <div class="alert alert-warning mb-3" id="pos-void-alert">
+                                            Voided order <?php echo htmlspecialchars('DR' . $prefillOrderNo); ?> loaded. Please review and submit as a new order.
+                                        </div>
+                                    <?php elseif ($prefillOrderNo !== '' && $prefillError !== null): ?>
+                                        <div class="alert alert-danger mb-3">
+                                            <?php echo htmlspecialchars($prefillError); ?>
+                                        </div>
+                                    <?php endif; ?>
                                     <div class="row align-items-center g-3">
                                         <div class="col-12 col-md-3 col-lg-2">
                                             <label class="form-label fw-semibold mb-0">Customer:</label>
@@ -774,12 +852,33 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
 <!-- This code is useful for content -->
 
 <!-- This code is useful for internal scripts  -->
-<?php ob_start(); ?>
+<?php
+$jsonFlags = 0;
+if (defined('JSON_HEX_TAG')) {
+    $jsonFlags |= JSON_HEX_TAG;
+}
+if (defined('JSON_HEX_AMP')) {
+    $jsonFlags |= JSON_HEX_AMP;
+}
+if (defined('JSON_HEX_APOS')) {
+    $jsonFlags |= JSON_HEX_APOS;
+}
+if (defined('JSON_HEX_QUOT')) {
+    $jsonFlags |= JSON_HEX_QUOT;
+}
+$prefillOrderJson = $prefillOrder !== null ? json_encode($prefillOrder, $jsonFlags) : 'null';
+if ($prefillOrderJson === false) {
+    $prefillOrderJson = 'null';
+}
+ob_start();
+?>
 
         <script>
             document.addEventListener('DOMContentLoaded', function () {
+                var prefillOrder = <?php echo $prefillOrderJson; ?>;
                 var orderOptions = Array.prototype.slice.call(document.querySelectorAll('.order-type-option'));
                 var deliveryOption = document.getElementById('order-type-delivery');
+                var pickupOption = document.getElementById('order-type-pickup');
                 var deliveryFields = Array.prototype.slice.call(document.querySelectorAll('.pos-terminal-delivery-fields'));
 
                 function updateDeliveryVisibility() {
@@ -1446,6 +1545,97 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                     updateUnitPrice();
                 }
 
+                function applyPrefillOrder(order) {
+                    if (!order || !customerSelect) {
+                        return;
+                    }
+
+                    var customerCode = String(order.customer_code || '').trim();
+                    if (customerCode) {
+                        for (var i = 0; i < customerSelect.options.length; i++) {
+                            var option = customerSelect.options[i];
+                            if (option && option.dataset && option.dataset.code === customerCode) {
+                                customerSelect.value = option.value;
+                                break;
+                            }
+                        }
+                    }
+
+                    updateCustomerDetails();
+                    setCustomerDependentEnabled(isCustomerSelected());
+
+                    var orderType = order.order_type || '';
+                    if (!orderType) {
+                        orderType = (order.date_delivery || order.time_delivery || order.delivery_instruction) ? 'delivery' : 'store-pickup';
+                    }
+
+                    if (pickupOption) {
+                        pickupOption.checked = orderType === 'store-pickup';
+                    }
+                    if (deliveryOption) {
+                        deliveryOption.checked = orderType === 'delivery';
+                    }
+
+                    updateDeliveryVisibility();
+
+                    if (dateDeliveryInput) {
+                        dateDeliveryInput.value = order.date_delivery || '';
+                    }
+                    if (timeDeliveryInput) {
+                        timeDeliveryInput.value = order.time_delivery || '';
+                    }
+                    if (deliveryInstructionInput) {
+                        deliveryInstructionInput.value = order.delivery_instruction || '';
+                    }
+                    if (discountInput) {
+                        discountInput.value = Number(order.discount || 0).toString();
+                    }
+                    if (amountReceivedInput) {
+                        amountReceivedInput.value = '0';
+                    }
+
+                    lineItems = (Array.isArray(order.items) ? order.items : []).map(function (item) {
+                        var qty = Number(item.qty || item.quantity || 0);
+                        if (Number.isNaN(qty) || qty < 0) {
+                            qty = 0;
+                        }
+                        var unitPrice = Number(item.unit_price || item.unitPrice || 0);
+                        if (Number.isNaN(unitPrice) || unitPrice < 0) {
+                            unitPrice = 0;
+                        }
+                        var lineDiscount = Number(item.lineitem_discount || item.lineDiscount || 0);
+                        if (Number.isNaN(lineDiscount) || lineDiscount < 0) {
+                            lineDiscount = 0;
+                        }
+                        var grossAmount = qty * unitPrice;
+                        if (lineDiscount > grossAmount) {
+                            lineDiscount = grossAmount;
+                        }
+                        var amount = Number(item.amount || 0);
+                        if (Number.isNaN(amount) || amount <= 0) {
+                            amount = grossAmount - lineDiscount;
+                        }
+                        var unitDiscount = qty > 0 ? lineDiscount / qty : 0;
+
+                        return {
+                            code: item.product_code || item.code || '',
+                            description: item.product_description || item.description || '',
+                            uom: item.uom || '',
+                            qty: qty,
+                            unitPrice: unitPrice,
+                            unitDiscount: unitDiscount,
+                            lineDiscount: lineDiscount,
+                            grossAmount: grossAmount,
+                            amount: amount
+                        };
+                    });
+
+                    renderLineItems();
+                    updateEmptyState();
+                    updateTotals();
+                    updateSubmitEnabled();
+                }
+
                 if (productSelect) {
                     productSelect.addEventListener('change', updateUnitPrice);
                     updateUnitPrice();
@@ -1733,6 +1923,10 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                         resetOrderForm();
                         closePreviewModal(true);
                     });
+                }
+
+                if (prefillOrder) {
+                    applyPrefillOrder(prefillOrder);
                 }
             });
         </script>

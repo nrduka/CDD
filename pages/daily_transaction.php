@@ -17,6 +17,141 @@ if (!in_array($role, $allowedRoles, true) && $assignedDepartments === '') {
 
 require_once __DIR__ . '/db2.php';
 
+$isVoidRequest = isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'POST';
+
+function send_daily_transaction_json_response($payload, $statusCode = 200)
+{
+    if (ob_get_length()) {
+        ob_clean();
+    }
+    http_response_code($statusCode);
+    header('Content-Type: application/json; charset=UTF-8');
+    echo json_encode($payload);
+    exit;
+}
+
+if ($isVoidRequest) {
+    if (!isset($mysqli) || !$mysqli) {
+        send_daily_transaction_json_response(['success' => false, 'message' => 'Database connection unavailable.'], 500);
+    }
+
+    $rawBody = file_get_contents('php://input');
+    $payload = json_decode($rawBody, true);
+    if (!is_array($payload)) {
+        send_daily_transaction_json_response(['success' => false, 'message' => 'Invalid request payload.'], 400);
+    }
+
+    $action = trim((string)(isset($payload['action']) ? $payload['action'] : ''));
+    if ($action !== 'void_order') {
+        send_daily_transaction_json_response(['success' => false, 'message' => 'Unsupported action.'], 400);
+    }
+    $redirectToPos = isset($payload['redirect']) ? (bool)$payload['redirect'] : true;
+
+    $orderNo = trim((string)(isset($payload['order_no']) ? $payload['order_no'] : ''));
+    $remarks = trim((string)(isset($payload['remarks']) ? $payload['remarks'] : ''));
+    $supervisorUsername = trim((string)(isset($payload['supervisor_username']) ? $payload['supervisor_username'] : ''));
+    $supervisorPassword = trim((string)(isset($payload['supervisor_password']) ? $payload['supervisor_password'] : ''));
+
+    if ($orderNo === '' || $remarks === '' || $supervisorUsername === '' || $supervisorPassword === '') {
+        send_daily_transaction_json_response(['success' => false, 'message' => 'Order number, reason, and admin credentials are required.'], 422);
+    }
+
+    if (strlen($remarks) > 100) {
+        $remarks = substr($remarks, 0, 100);
+    }
+
+    $supervisorStmt = $mysqli->prepare("SELECT username, role, firstname, lastname FROM user WHERE username = ? AND password = ? LIMIT 1");
+    if (!$supervisorStmt) {
+        send_daily_transaction_json_response(['success' => false, 'message' => 'Unable to validate admin credentials.'], 500);
+    }
+    $supervisorStmt->bind_param('ss', $supervisorUsername, $supervisorPassword);
+    if (!$supervisorStmt->execute()) {
+        $supervisorStmt->close();
+        send_daily_transaction_json_response(['success' => false, 'message' => 'Unable to validate admin credentials.'], 500);
+    }
+    $supervisorResult = $supervisorStmt->get_result();
+    $supervisorRow = $supervisorResult ? $supervisorResult->fetch_assoc() : null;
+    $supervisorStmt->close();
+
+    if (!$supervisorRow) {
+        send_daily_transaction_json_response(['success' => false, 'message' => 'Admin credentials are invalid.'], 403);
+    }
+
+    $supervisorRole = strtoupper(trim((string)(isset($supervisorRow['role']) ? $supervisorRow['role'] : '')));
+    $allowedSupervisorRoles = ['ADMIN'];
+    if (!in_array($supervisorRole, $allowedSupervisorRoles, true)) {
+        send_daily_transaction_json_response(['success' => false, 'message' => 'Admin access is required to void orders.'], 403);
+    }
+
+    $authorizedBy = trim((string)(isset($supervisorRow['firstname']) ? $supervisorRow['firstname'] : '') . ' ' . (string)(isset($supervisorRow['lastname']) ? $supervisorRow['lastname'] : ''));
+    if ($authorizedBy === '') {
+        $authorizedBy = trim((string)(isset($supervisorRow['username']) ? $supervisorRow['username'] : ''));
+    }
+
+    $voidByUser = '';
+    $sessionUserId = isset($_SESSION['sess_user_id']) ? (int)$_SESSION['sess_user_id'] : 0;
+    if ($sessionUserId > 0) {
+        $voidUserStmt = $mysqli->prepare("SELECT username, firstname, lastname FROM user WHERE id = ? LIMIT 1");
+        if ($voidUserStmt) {
+            $voidUserStmt->bind_param('i', $sessionUserId);
+            if ($voidUserStmt->execute()) {
+                $voidUserResult = $voidUserStmt->get_result();
+                $voidUserRow = $voidUserResult ? $voidUserResult->fetch_assoc() : null;
+                if ($voidUserRow) {
+                    $voidByUser = trim((string)(isset($voidUserRow['username']) ? $voidUserRow['username'] : ''));
+                    if ($voidByUser === '') {
+                        $voidByUser = trim((string)(isset($voidUserRow['firstname']) ? $voidUserRow['firstname'] : '') . ' ' . (string)(isset($voidUserRow['lastname']) ? $voidUserRow['lastname'] : ''));
+                    }
+                }
+            }
+            $voidUserStmt->close();
+        }
+    }
+    if ($voidByUser === '') {
+        $voidByUser = trim((string)(isset($_SESSION['sess_firstname']) ? $_SESSION['sess_firstname'] : '') . ' ' . (string)(isset($_SESSION['sess_lastname']) ? $_SESSION['sess_lastname'] : ''));
+    }
+
+    $checkStmt = $mysqli->prepare("SELECT COUNT(*) AS total_rows, SUM(CASE WHEN void_status = 1 THEN 1 ELSE 0 END) AS voided_rows FROM sales WHERE order_no = ?");
+    if (!$checkStmt) {
+        send_daily_transaction_json_response(['success' => false, 'message' => 'Unable to verify order status.'], 500);
+    }
+    $checkStmt->bind_param('s', $orderNo);
+    $checkStmt->execute();
+    $checkResult = $checkStmt->get_result();
+    $checkRow = $checkResult ? $checkResult->fetch_assoc() : null;
+    $checkStmt->close();
+
+    if (!$checkRow || (int)$checkRow['total_rows'] === 0) {
+        send_daily_transaction_json_response(['success' => false, 'message' => 'Order not found.'], 404);
+    }
+    if ((int)$checkRow['voided_rows'] > 0) {
+        send_daily_transaction_json_response(['success' => false, 'message' => 'Order is already voided.'], 409);
+    }
+
+    $updateStmt = $mysqli->prepare("UPDATE sales SET void_status = 1, void_remarks = ?, void_authorized_by = ?, void_by_user = ?, datetime_void = NOW() WHERE order_no = ? AND (void_status IS NULL OR void_status = 0)");
+    if (!$updateStmt) {
+        send_daily_transaction_json_response(['success' => false, 'message' => 'Unable to void order.'], 500);
+    }
+    $updateStmt->bind_param('ssss', $remarks, $authorizedBy, $voidByUser, $orderNo);
+    if (!$updateStmt->execute()) {
+        $updateStmt->close();
+        send_daily_transaction_json_response(['success' => false, 'message' => 'Unable to void order.'], 500);
+    }
+    $affectedRows = $updateStmt->affected_rows;
+    $updateStmt->close();
+
+    if ($affectedRows <= 0) {
+        send_daily_transaction_json_response(['success' => false, 'message' => 'Order is already voided.'], 409);
+    }
+
+    if ($redirectToPos) {
+        $redirectUrl = $baseUrl . '/pages/pos_terminal.php?void_order_no=' . urlencode($orderNo);
+        send_daily_transaction_json_response(['success' => true, 'redirect_url' => $redirectUrl]);
+    }
+
+    send_daily_transaction_json_response(['success' => true, 'message' => 'Order is now voided.']);
+}
+
 $reportDateInput = isset($_GET['date']) ? trim((string)$_GET['date']) : '';
 $reportDate = $reportDateInput !== '' ? $reportDateInput : date('Y-m-d');
 $reportDateObject = DateTime::createFromFormat('Y-m-d', $reportDate);
@@ -79,6 +214,9 @@ if (!isset($mysqli) || !$mysqli) {
                    s.date_created,
                    s.amt_received,
                    s.amt_change,
+                   s.void_status,
+                   s.void_remarks,
+                   s.void_authorized_by,
                    c.storeName,
                    c.address,
                    c.firstName,
@@ -115,6 +253,9 @@ if (!isset($mysqli) || !$mysqli) {
                         'discount' => isset($row['discount']) ? (float)$row['discount'] : 0.0,
                         'amt_received' => isset($row['amt_received']) ? (float)$row['amt_received'] : 0.0,
                         'amt_change' => isset($row['amt_change']) ? (float)$row['amt_change'] : 0.0,
+                        'void_status' => isset($row['void_status']) ? (int)$row['void_status'] : 0,
+                        'void_remarks' => trim((string)(isset($row['void_remarks']) ? $row['void_remarks'] : '')),
+                        'void_authorized_by' => trim((string)(isset($row['void_authorized_by']) ? $row['void_authorized_by'] : '')),
                         'items' => [],
                         'total_qty' => 0,
                         'total_amount' => 0
@@ -143,6 +284,18 @@ if (!isset($mysqli) || !$mysqli) {
                 $orders[$orderNo]['total_qty'] += $qty;
                 $orders[$orderNo]['total_amount'] += $amount;
                 $grandTotal += $amount;
+
+                if (isset($row['void_status']) && (int)$row['void_status'] === 1) {
+                    $orders[$orderNo]['void_status'] = 1;
+                }
+                $voidRemarks = trim((string)(isset($row['void_remarks']) ? $row['void_remarks'] : ''));
+                if ($orders[$orderNo]['void_remarks'] === '' && $voidRemarks !== '') {
+                    $orders[$orderNo]['void_remarks'] = $voidRemarks;
+                }
+                $voidAuthorizedBy = trim((string)(isset($row['void_authorized_by']) ? $row['void_authorized_by'] : ''));
+                if ($orders[$orderNo]['void_authorized_by'] === '' && $voidAuthorizedBy !== '') {
+                    $orders[$orderNo]['void_authorized_by'] = $voidAuthorizedBy;
+                }
             }
             $result->free();
         }
@@ -332,7 +485,14 @@ ob_start();
                             <tbody>
                                 <?php foreach ($orderList as $order): ?>
                                     <tr>
-                                        <td><?php echo htmlspecialchars('DR' . $order['order_no']); ?></td>
+                                        <td>
+                                            <div class="fw-semibold">
+                                                <?php echo htmlspecialchars('DR' . $order['order_no']); ?>
+                                                <?php if (!empty($order['void_status'])): ?>
+                                                    <span class="badge bg-danger ms-2">Voided</span>
+                                                <?php endif; ?>
+                                            </div>
+                                        </td>
                                         <td>
                                             <div class="fw-semibold"><?php echo htmlspecialchars($order['customer_name'] !== '' ? $order['customer_name'] : $order['customer_code']); ?></div>
                                             <div class="text-muted small"><?php echo htmlspecialchars($order['customer_code']); ?></div>
@@ -341,9 +501,14 @@ ob_start();
                                         <td class="text-end"><?php echo number_format($order['total_amount'], 2); ?></td>
                                         <td><?php echo htmlspecialchars($order['date_created']); ?></td>
                                         <td class="text-center">
-                                            <button type="button" class="btn btn-sm btn-outline-primary pos-print-order" data-order-no="<?php echo htmlspecialchars($order['order_no']); ?>">
-                                                Print
-                                            </button>
+                                            <div class="d-inline-flex flex-wrap gap-2 justify-content-center">
+                                                <button type="button" class="btn btn-sm btn-outline-primary pos-print-order" data-order-no="<?php echo htmlspecialchars($order['order_no']); ?>">
+                                                    Print
+                                                </button>
+                                                <button type="button" class="btn btn-sm btn-outline-danger pos-void-order" data-order-no="<?php echo htmlspecialchars($order['order_no']); ?>" <?php echo !empty($order['void_status']) ? 'disabled aria-disabled="true"' : ''; ?>>
+                                                    Void
+                                                </button>
+                                            </div>
                                         </td>
                                     </tr>
                                 <?php endforeach; ?>
@@ -357,6 +522,38 @@ ob_start();
 </div>
 
 <div id="daily-transaction-print-area" class="pos-print-area" aria-hidden="true"></div>
+
+<div class="modal fade" id="void-order-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Void Order</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted small mb-3">Order: <span id="void-order-label" class="fw-semibold"></span></p>
+                <div class="mb-3">
+                    <label class="form-label fw-semibold" for="void-reason">Reason for voiding</label>
+                    <textarea class="form-control" id="void-reason" rows="3" maxlength="100" placeholder="Enter reason for voiding"></textarea>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label fw-semibold" for="void-admin-username">Admin Username</label>
+                    <input type="text" class="form-control" id="void-admin-username" name="void_admin_user" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true" data-form-type="other" placeholder="Admin username">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label fw-semibold" for="void-admin-password">Admin Password</label>
+                    <input type="password" class="form-control" id="void-admin-password" name="void_admin_pass" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" data-form-type="other" placeholder="Admin password">
+                </div>
+                <div class="alert alert-danger d-none" id="void-order-error"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-outline-danger" id="void-order-cancel-only">Cancel Order</button>
+                <button type="button" class="btn btn-danger" id="void-order-confirm">Void and Reorder</button>
+            </div>
+        </div>
+    </div>
+</div>
 <?php
 $content = ob_get_clean();
 
@@ -411,9 +608,28 @@ $scriptsBuffer = function () use ($ordersJson, $baseUrl) {
                     info: 'Showing _START_ to _END_ of _TOTAL_ orders',
                     infoEmpty: 'Showing 0 to 0 of 0 orders',
                     paginate: { previous: 'Previous', next: 'Next' }
+                },
+                initComplete: function () {
+                    disableSearchAutofill();
                 }
             };
             table.DataTable(options);
+            table.on('draw.dt', disableSearchAutofill);
+        }
+
+        function disableSearchAutofill() {
+            var filterInput = document.querySelector('#daily-transaction-table_filter input');
+            if (!filterInput) {
+                return;
+            }
+            filterInput.setAttribute('name', 'transaction_filter');
+            filterInput.setAttribute('autocomplete', 'off');
+            filterInput.setAttribute('autocorrect', 'off');
+            filterInput.setAttribute('autocapitalize', 'off');
+            filterInput.setAttribute('spellcheck', 'false');
+            filterInput.setAttribute('data-lpignore', 'true');
+            filterInput.setAttribute('data-1p-ignore', 'true');
+            filterInput.setAttribute('data-form-type', 'other');
         }
 
         document.addEventListener('DOMContentLoaded', function () {
@@ -614,6 +830,9 @@ $scriptsBuffer = function () use ($ordersJson, $baseUrl) {
                 var lines = [];
 
                 lines.push(centerText('COLDDUST BENTEL ICE MANUFACTURING', width));
+                if (order.void_status) {
+                    lines.push(centerText('VOID DR', width));
+                }
                 lines.push(centerText('DELIVERY RECEIPT', width));
                 lines.push(centerText('DATE/TIME: ' + printedLabel, width));
                 lines.push(centerText(drNumber, width));
@@ -713,16 +932,202 @@ $scriptsBuffer = function () use ($ordersJson, $baseUrl) {
                 window.print();
             }
 
-            var printButtons = document.querySelectorAll('.pos-print-order');
-            printButtons.forEach(function (button) {
-                button.addEventListener('click', function () {
-                    var orderNo = button.getAttribute('data-order-no');
+            document.addEventListener('click', function (event) {
+                var printButton = event.target ? event.target.closest('.pos-print-order') : null;
+                if (printButton) {
+                    var orderNo = printButton.getAttribute('data-order-no');
                     if (!orderNo) {
                         return;
                     }
                     handlePrintClick(orderNo);
-                });
+                    return;
+                }
+
+                var voidButton = event.target ? event.target.closest('.pos-void-order') : null;
+                if (!voidButton) {
+                    return;
+                }
+                if (voidButton.disabled || voidButton.getAttribute('aria-disabled') === 'true') {
+                    return;
+                }
+                var voidOrderNo = voidButton.getAttribute('data-order-no');
+                if (!voidOrderNo) {
+                    return;
+                }
+                if (!voidModalInstance) {
+                    handleVoidPrompt(voidOrderNo);
+                    return;
+                }
+                resetVoidModal(voidOrderNo);
+                voidModalInstance.show();
             });
+
+            var voidModalEl = document.getElementById('void-order-modal');
+            var voidOrderLabel = document.getElementById('void-order-label');
+            var voidReasonInput = document.getElementById('void-reason');
+            var voidSupervisorInput = document.getElementById('void-admin-username');
+            var voidPasswordInput = document.getElementById('void-admin-password');
+            var voidError = document.getElementById('void-order-error');
+            var voidConfirmButton = document.getElementById('void-order-confirm');
+            var voidCancelOnlyButton = document.getElementById('void-order-cancel-only');
+            var voidModalInstance = null;
+            var pendingVoidOrderNo = '';
+
+            if (voidModalEl && window.bootstrap && bootstrap.Modal) {
+                voidModalInstance = new bootstrap.Modal(voidModalEl);
+                voidModalEl.addEventListener('shown.bs.modal', function () {
+                    if (voidSupervisorInput) {
+                        voidSupervisorInput.focus();
+                    }
+                });
+            }
+
+            function showVoidError(message) {
+                if (!voidError) {
+                    window.alert(message);
+                    return;
+                }
+                voidError.textContent = message;
+                voidError.classList.remove('d-none');
+            }
+
+            function resetVoidModal(orderNo) {
+                pendingVoidOrderNo = orderNo || '';
+                if (voidOrderLabel) {
+                    voidOrderLabel.textContent = orderNo ? ('DR' + orderNo) : '';
+                }
+                if (voidReasonInput) {
+                    voidReasonInput.value = '';
+                }
+                if (voidSupervisorInput) {
+                    voidSupervisorInput.value = '';
+                }
+                if (voidPasswordInput) {
+                    voidPasswordInput.value = '';
+                }
+                if (voidError) {
+                    voidError.textContent = '';
+                    voidError.classList.add('d-none');
+                }
+            }
+
+            function submitVoidRequest(orderNo, reason, supervisorUsername, supervisorPassword, redirectToPos) {
+                return fetch(window.location.href, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        action: 'void_order',
+                        order_no: orderNo,
+                        remarks: reason,
+                        supervisor_username: supervisorUsername,
+                        supervisor_password: supervisorPassword,
+                        redirect: redirectToPos !== false
+                    })
+                })
+                    .then(function (response) {
+                        return response.json().then(function (data) {
+                            return { ok: response.ok, data: data };
+                        });
+                    });
+            }
+
+            function handleVoidPrompt(orderNo) {
+                var reason = window.prompt('Reason for voiding (max 100 characters):');
+                if (!reason) {
+                    return;
+                }
+                var supervisorUsername = window.prompt('Admin username:');
+                if (!supervisorUsername) {
+                    return;
+                }
+                var supervisorPassword = window.prompt('Admin password:');
+                if (!supervisorPassword) {
+                    return;
+                }
+                submitVoidRequest(orderNo, reason, supervisorUsername, supervisorPassword, false)
+                    .then(function (result) {
+                        if (!result.ok || !result.data || !result.data.success) {
+                            var message = result.data && result.data.message ? result.data.message : 'Unable to void order.';
+                            throw new Error(message);
+                        }
+                        window.alert(result.data && result.data.message ? result.data.message : 'Order is now voided.');
+                        window.location.reload();
+                    })
+                    .catch(function (error) {
+                        window.alert(error && error.message ? error.message : 'Unable to void order.');
+                    });
+            }
+
+            function handleVoidSubmit(redirectToPos) {
+                var reason = voidReasonInput ? voidReasonInput.value.trim() : '';
+                var supervisorUsername = voidSupervisorInput ? voidSupervisorInput.value.trim() : '';
+                var supervisorPassword = voidPasswordInput ? voidPasswordInput.value : '';
+
+                if (!pendingVoidOrderNo) {
+                    showVoidError('Select an order to void.');
+                    return;
+                }
+                if (!reason) {
+                    showVoidError('Enter a reason for voiding.');
+                    return;
+                }
+                if (!supervisorUsername || !supervisorPassword) {
+                    showVoidError('Admin credentials are required.');
+                    return;
+                }
+
+                var activeButton = redirectToPos ? voidConfirmButton : voidCancelOnlyButton;
+                var originalText = activeButton ? activeButton.textContent : '';
+                if (activeButton) {
+                    activeButton.textContent = 'Voiding...';
+                    activeButton.disabled = true;
+                }
+                if (voidConfirmButton && voidCancelOnlyButton) {
+                    voidConfirmButton.disabled = true;
+                    voidCancelOnlyButton.disabled = true;
+                }
+
+                submitVoidRequest(pendingVoidOrderNo, reason, supervisorUsername, supervisorPassword, redirectToPos)
+                    .then(function (result) {
+                        if (!result.ok || !result.data || !result.data.success) {
+                            var message = result.data && result.data.message ? result.data.message : 'Unable to void order.';
+                            throw new Error(message);
+                        }
+                        if (redirectToPos) {
+                            window.location.href = result.data.redirect_url || window.location.href;
+                            return;
+                        }
+                        window.alert(result.data && result.data.message ? result.data.message : 'Order is now voided.');
+                        window.location.reload();
+                    })
+                    .catch(function (error) {
+                        showVoidError(error && error.message ? error.message : 'Unable to void order.');
+                    })
+                    .then(function () {
+                        if (activeButton) {
+                            activeButton.textContent = originalText;
+                            activeButton.disabled = false;
+                        }
+                        if (voidConfirmButton && voidCancelOnlyButton) {
+                            voidConfirmButton.disabled = false;
+                            voidCancelOnlyButton.disabled = false;
+                        }
+                    });
+            }
+
+            if (voidConfirmButton) {
+                voidConfirmButton.addEventListener('click', function () {
+                    handleVoidSubmit(true);
+                });
+            }
+
+            if (voidCancelOnlyButton) {
+                voidCancelOnlyButton.addEventListener('click', function () {
+                    handleVoidSubmit(false);
+                });
+            }
         });
     </script>
     <?php
