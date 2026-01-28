@@ -40,123 +40,64 @@ if (!isset($mysqli) || !$mysqli) {
     exit;
 }
 
-function buildCustomerName($row)
+function resolveSalesDateTime($primaryValue, $fallbackValue)
 {
-    $firstName = trim((string)(isset($row['firstName']) ? $row['firstName'] : ''));
-    $middleName = trim((string)(isset($row['middleName']) ? $row['middleName'] : ''));
-    $lastName = trim((string)(isset($row['lastName']) ? $row['lastName'] : ''));
+    $primaryValue = trim((string)$primaryValue);
+    $fallbackValue = trim((string)$fallbackValue);
+    $dateTime = null;
 
-    $parts = [];
-    if ($firstName !== '') {
-        $parts[] = $firstName;
+    if ($primaryValue !== '' && $primaryValue !== '0000-00-00 00:00:00') {
+        $dateTime = DateTime::createFromFormat('Y-m-d H:i:s', $primaryValue);
     }
-    if ($middleName !== '') {
-        $parts[] = $middleName;
-    }
-    if ($lastName !== '') {
-        $parts[] = $lastName;
+    if (!$dateTime && $fallbackValue !== '' && $fallbackValue !== '0000-00-00 00:00:00') {
+        $dateTime = DateTime::createFromFormat('Y-m-d H:i:s', $fallbackValue);
     }
 
-    $name = trim(implode(' ', $parts));
-    if ($name === '') {
-        $storeName = trim((string)(isset($row['storeName']) ? $row['storeName'] : ''));
-        if ($storeName !== '') {
-            $name = $storeName;
-        }
-    }
-
-    return $name;
+    return $dateTime ?: null;
 }
 
-function fetchDailyTransactions($mysqli, $reportDate)
+function fetchDailyRegisterRows($mysqli, $reportDate)
 {
     $rows = [];
     $sql = "SELECT s.order_no,
                    s.customer_code,
-                   s.lineitem,
+                   s.qty,
                    s.product_code,
                    s.product_description,
-                   s.lineitem_discount,
-                   s.discount,
                    s.unit_price,
-                   s.qty,
                    s.amount,
-                   c.firstName,
-                   c.middleName,
-                   c.lastName,
-                   c.storeName
+                   s.date_created,
+                   s.date_time_ordered,
+                   s.amt_received,
+                   s.amt_change
             FROM sales s
-            LEFT JOIN customer_register c ON c.customer_code = s.customer_code
             WHERE DATE(s.date_created) = ?
-            ORDER BY s.order_no, s.lineitem";
+            ORDER BY s.date_created, s.order_no, s.lineitem";
 
     $stmt = $mysqli->prepare($sql);
     if ($stmt) {
         $stmt->bind_param('s', $reportDate);
         if ($stmt->execute() && ($result = $stmt->get_result())) {
             while ($row = $result->fetch_assoc()) {
+                $orderedAt = resolveSalesDateTime(
+                    isset($row['date_time_ordered']) ? $row['date_time_ordered'] : '',
+                    isset($row['date_created']) ? $row['date_created'] : ''
+                );
+                $dateLabel = $orderedAt ? $orderedAt->format('Y-m-d') : '';
+                $timeLabel = $orderedAt ? $orderedAt->format('H:i:s') : '';
+
                 $rows[] = [
                     'order_no' => isset($row['order_no']) ? (string)$row['order_no'] : '',
                     'customer_code' => isset($row['customer_code']) ? (string)$row['customer_code'] : '',
-                    'lineitem' => isset($row['lineitem']) ? (int)$row['lineitem'] : 0,
-                    'product_code' => isset($row['product_code']) ? (string)$row['product_code'] : '',
-                    'product_description' => isset($row['product_description']) ? (string)$row['product_description'] : '',
-                    'lineitem_discount' => isset($row['lineitem_discount']) ? (float)$row['lineitem_discount'] : 0,
-                    'discount' => isset($row['discount']) ? (float)$row['discount'] : 0,
-                    'unit_price' => isset($row['unit_price']) ? (float)$row['unit_price'] : 0,
                     'qty' => isset($row['qty']) ? (float)$row['qty'] : 0,
-                    'amount' => isset($row['amount']) ? (float)$row['amount'] : 0,
-                    'firstName' => isset($row['firstName']) ? (string)$row['firstName'] : '',
-                    'middleName' => isset($row['middleName']) ? (string)$row['middleName'] : '',
-                    'lastName' => isset($row['lastName']) ? (string)$row['lastName'] : '',
-                    'storeName' => isset($row['storeName']) ? (string)$row['storeName'] : ''
-                ];
-            }
-            $result->free();
-        }
-        $stmt->close();
-    }
-
-    return $rows;
-}
-
-function fetchDailySalesByProduct($mysqli, $reportDate)
-{
-    $rows = [];
-    $sql = "SELECT COALESCE(p.product_type, 'Unspecified') AS product_type,
-                   p.product_code AS product_code,
-                   p.product_description AS product_description,
-                   p.unit_price AS unit_price,
-                   COALESCE(SUM(s.lineitem_discount), 0) AS lineitem_discount_total,
-                   COALESCE(SUM(s.discount), 0) AS discount_total,
-                   COALESCE(SUM(s.qty), 0) AS qty_total,
-                   COALESCE(SUM(s.amount), 0) AS amount_total
-            FROM ice_product p
-            LEFT JOIN sales s
-                ON s.product_code = p.product_code
-                AND DATE(s.date_created) = ?
-            WHERE COALESCE(p.status, 0) <> 1
-            GROUP BY COALESCE(p.product_type, 'Unspecified'),
-                     p.product_code,
-                     p.product_description,
-                     p.unit_price
-            ORDER BY COALESCE(p.product_type, 'Unspecified'),
-                     p.product_code";
-
-    $stmt = $mysqli->prepare($sql);
-    if ($stmt) {
-        $stmt->bind_param('s', $reportDate);
-        if ($stmt->execute() && ($result = $stmt->get_result())) {
-            while ($row = $result->fetch_assoc()) {
-                $rows[] = [
-                    'product_type' => isset($row['product_type']) ? (string)$row['product_type'] : 'Unspecified',
                     'product_code' => isset($row['product_code']) ? (string)$row['product_code'] : '',
                     'product_description' => isset($row['product_description']) ? (string)$row['product_description'] : '',
                     'unit_price' => isset($row['unit_price']) ? (float)$row['unit_price'] : 0,
-                    'lineitem_discount_total' => isset($row['lineitem_discount_total']) ? (float)$row['lineitem_discount_total'] : 0,
-                    'discount_total' => isset($row['discount_total']) ? (float)$row['discount_total'] : 0,
-                    'qty_total' => isset($row['qty_total']) ? (float)$row['qty_total'] : 0,
-                    'amount_total' => isset($row['amount_total']) ? (float)$row['amount_total'] : 0
+                    'amount' => isset($row['amount']) ? (float)$row['amount'] : 0,
+                    'amt_received' => isset($row['amt_received']) ? (float)$row['amt_received'] : 0,
+                    'amt_change' => isset($row['amt_change']) ? (float)$row['amt_change'] : 0,
+                    'date_label' => $dateLabel,
+                    'time_label' => $timeLabel
                 ];
             }
             $result->free();
@@ -167,19 +108,34 @@ function fetchDailySalesByProduct($mysqli, $reportDate)
     return $rows;
 }
 
-$transactions = fetchDailyTransactions($mysqli, $reportDate);
+$registerRows = fetchDailyRegisterRows($mysqli, $reportDate);
+$totalSales = 0;
+$uniqueOrders = [];
+foreach ($registerRows as $row) {
+    $totalSales += isset($row['amount']) ? (float)$row['amount'] : 0;
+    $orderKey = isset($row['order_no']) ? (string)$row['order_no'] : '';
+    if ($orderKey !== '') {
+        $uniqueOrders[$orderKey] = true;
+    }
+}
+
+$transactionCount = count($uniqueOrders);
+$dayCount = 1;
+$averageDailySales = $dayCount > 0 ? $totalSales / $dayCount : 0;
+$averageDailyTransactions = $dayCount > 0 ? $transactionCount / $dayCount : 0;
+$reportRangeLabel = 'from ' . date('F d', strtotime($reportDate)) . ' to ' . date('d, Y', strtotime($reportDate));
 
 $spreadsheet = new Spreadsheet();
 $sheet = $spreadsheet->getActiveSheet();
-$sheet->setTitle('Daily Transactions');
+$sheet->setTitle('Daily Sales Register');
 
-$sheet->setCellValue('A1', 'Daily Transaction Report');
-$sheet->getStyle('A1')->getFont()->setBold(true)->setSize(14);
-$sheet->setCellValue('A2', 'Report Date: ' . $reportDateLabel);
-$sheet->setCellValue('A3', 'Generated: ' . $generatedAt);
+$sheet->setCellValue('B1', 'DAILY SALES REGISTER');
+$sheet->getStyle('B1')->getFont()->setBold(true)->setSize(14);
+$sheet->setCellValue('B2', $reportRangeLabel);
+$sheet->setCellValue('B3', 'Generated: ' . $generatedAt);
 
 $headerStyle = [
-    'font' => ['bold' => true, 'color' => ['rgb' => '1f2937']],
+    'font' => ['bold' => true],
     'fill' => [
         'fillType' => Fill::FILL_SOLID,
         'startColor' => ['rgb' => 'e5e7eb']
@@ -197,231 +153,110 @@ $borderStyle = [
 
 $currencyFormat = '#,##0.00';
 
-$headerRow = 8;
-$dataRow = 9;
+$sheet->setCellValue('J1', 'TOTAL SALES');
+$sheet->setCellValue('K1', $totalSales);
+$sheet->setCellValue('J2', 'TOTAL TRANSACTION COUNT');
+$sheet->setCellValue('K2', $transactionCount);
+$sheet->setCellValue('J3', 'AVERAGE DAILY SALES');
+$sheet->setCellValue('K3', $averageDailySales);
+$sheet->setCellValue('J4', 'AVERAGE DAILY TRANSACTION COUNT');
+$sheet->setCellValue('K4', $averageDailyTransactions);
+$sheet->getStyle('J1:K4')->applyFromArray($borderStyle);
+$sheet->getStyle('J1:J4')->getFont()->setBold(true);
+$sheet->getStyle('K1')->getNumberFormat()->setFormatCode($currencyFormat);
+$sheet->getStyle('K2')->getNumberFormat()->setFormatCode('0');
+$sheet->getStyle('K3')->getNumberFormat()->setFormatCode($currencyFormat);
+$sheet->getStyle('K4')->getNumberFormat()->setFormatCode('0');
+$sheet->getStyle('K1:K4')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
 
-$headers = [
-    'No',
-    'Lineitem No',
-    'Order No',
-    'Customer Code',
-    'Customer',
-    'Product Code',
-    'Product Description',
-    'Line Item Discount',
-    'Discount',
-    'Unit Price',
-    'Qty',
-    'Amount'
+$headerRow = 8;
+$subHeaderRow = 9;
+$dataRow = 10;
+
+$topHeaders = [
+    'NO.',
+    'sales.date_time_ordered',
+    'sales.date_time_ordered',
+    'sales.order_no',
+    'sales.customer_code',
+    'sales.qty',
+    'sales.product_code',
+    'sales.product_description',
+    'sales.unit_price',
+    'sales.amount',
+    'sales.amt_received',
+    'sales.amt_change',
+    'sales.amt_received - sales.amt_change',
+    'sales.amt_received=0; display amount'
 ];
 
-$sheet->fromArray($headers, null, 'A' . $headerRow);
-$sheet->getStyle("A{$headerRow}:L{$headerRow}")->applyFromArray($headerStyle);
-$sheet->getStyle("A{$headerRow}:L{$headerRow}")
+$subHeaders = [
+    '',
+    'DATE',
+    'TIME',
+    'DR NO.',
+    'CUSTOMER CODE',
+    'QUANTITY',
+    'PRODUCT CODE',
+    'PRODUCT DESCRIPTION',
+    'UNIT PRICE',
+    'AMOUNT',
+    '',
+    '',
+    'CASH',
+    'ON ACCOUNT'
+];
+
+$sheet->fromArray($topHeaders, null, 'B' . $headerRow);
+$sheet->fromArray($subHeaders, null, 'B' . $subHeaderRow);
+$sheet->getStyle("B{$headerRow}:O{$subHeaderRow}")->applyFromArray($headerStyle);
+$sheet->getStyle("B{$headerRow}:O{$subHeaderRow}")
     ->getAlignment()
     ->setWrapText(true)
     ->setHorizontal(Alignment::HORIZONTAL_CENTER)
     ->setVertical(Alignment::VERTICAL_CENTER);
+$sheet->getStyle("B{$headerRow}:O{$headerRow}")->getFont()->getColor()->setRGB('475569');
+$sheet->getStyle("B{$subHeaderRow}:O{$subHeaderRow}")->getFont()->getColor()->setRGB('DC2626');
 
 $currentRow = $dataRow;
-$currentOrderNo = null;
-$orderSubtotal = 0;
-$grandTotal = 0;
-$orderCounter = 0;
-$lineNumber = 0;
-
-foreach ($transactions as $row) {
-    $orderNo = $row['order_no'] !== '' ? $row['order_no'] : 'UNKNOWN';
-
-    if ($currentOrderNo !== null && $orderNo !== $currentOrderNo) {
-        $sheet->setCellValue("C{$currentRow}", 'Subtotal');
-        $sheet->setCellValue("L{$currentRow}", $orderSubtotal);
-        $sheet->getStyle("A{$currentRow}:L{$currentRow}")->applyFromArray($headerStyle);
-        $sheet->getStyle("A{$currentRow}:L{$currentRow}")->getFont()->setBold(true);
-        $sheet->getStyle("L{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-        $currentRow++;
-        $orderSubtotal = 0;
-        $lineNumber = 0;
-    }
-
-    if ($currentOrderNo === null || $orderNo !== $currentOrderNo) {
-        $currentOrderNo = $orderNo;
-        $orderCounter++;
-    }
-
-    $lineNumber++;
-    $customerName = buildCustomerName($row);
-    $lineItemNo = $row['lineitem'] !== '' ? $row['lineitem'] : $lineNumber;
-    $orderNumberCell = $lineNumber === 1 ? $orderCounter : '';
-
-    $sheet->setCellValue("A{$currentRow}", $orderNumberCell);
-    $sheet->setCellValue("B{$currentRow}", $lineItemNo);
-    $sheet->setCellValueExplicit("C{$currentRow}", $orderNo, DataType::TYPE_STRING);
-    $sheet->setCellValueExplicit("D{$currentRow}", $row['customer_code'], DataType::TYPE_STRING);
-    $sheet->setCellValue("E{$currentRow}", $customerName);
-    $sheet->setCellValueExplicit("F{$currentRow}", $row['product_code'], DataType::TYPE_STRING);
-    $sheet->setCellValue("G{$currentRow}", $row['product_description']);
-    $sheet->setCellValue("H{$currentRow}", $row['lineitem_discount']);
-    $sheet->setCellValue("I{$currentRow}", $row['discount']);
+$lineNumber = 1;
+foreach ($registerRows as $row) {
+    $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+    $orderNoDisplay = $orderNo !== '' ? 'DR' . $orderNo : '';
+    $sheet->setCellValue("B{$currentRow}", $lineNumber);
+    $sheet->setCellValueExplicit("C{$currentRow}", $row['date_label'], DataType::TYPE_STRING);
+    $sheet->setCellValueExplicit("D{$currentRow}", $row['time_label'], DataType::TYPE_STRING);
+    $sheet->setCellValueExplicit("E{$currentRow}", $orderNoDisplay, DataType::TYPE_STRING);
+    $sheet->setCellValueExplicit("F{$currentRow}", $row['customer_code'], DataType::TYPE_STRING);
+    $sheet->setCellValue("G{$currentRow}", $row['qty']);
+    $sheet->setCellValueExplicit("H{$currentRow}", $row['product_code'], DataType::TYPE_STRING);
+    $sheet->setCellValue("I{$currentRow}", $row['product_description']);
     $sheet->setCellValue("J{$currentRow}", $row['unit_price']);
-    $sheet->setCellValue("K{$currentRow}", $row['qty']);
-    $sheet->setCellValue("L{$currentRow}", $row['amount']);
-    $sheet->getStyle("H{$currentRow}:J{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-    $sheet->getStyle("L{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-
-    $orderSubtotal += $row['amount'];
-    $grandTotal += $row['amount'];
+    $sheet->setCellValue("K{$currentRow}", $row['amount']);
+    $sheet->setCellValue("L{$currentRow}", $row['amt_received']);
+    $sheet->setCellValue("M{$currentRow}", $row['amt_change']);
+    $sheet->setCellValue("N{$currentRow}", "=L{$currentRow}-M{$currentRow}");
+    $sheet->setCellValue("O{$currentRow}", "=IF(L{$currentRow}=0,K{$currentRow},0)");
     $currentRow++;
+    $lineNumber++;
 }
 
-if ($currentOrderNo !== null) {
-    $sheet->setCellValue("C{$currentRow}", 'Subtotal');
-    $sheet->setCellValue("L{$currentRow}", $orderSubtotal);
-    $sheet->getStyle("A{$currentRow}:L{$currentRow}")->applyFromArray($headerStyle);
-    $sheet->getStyle("A{$currentRow}:L{$currentRow}")->getFont()->setBold(true);
-    $sheet->getStyle("L{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-    $currentRow++;
+$lastDataRow = $currentRow - 1;
+if ($lastDataRow < $subHeaderRow) {
+    $lastDataRow = $subHeaderRow;
+}
+if ($lastDataRow >= $headerRow) {
+    $sheet->getStyle("B{$headerRow}:O{$lastDataRow}")->applyFromArray($borderStyle);
+}
+if ($lastDataRow >= $dataRow) {
+    $sheet->getStyle("G{$dataRow}:O{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
 }
 
-$sheet->setCellValue("C{$currentRow}", 'Grand Total');
-$sheet->setCellValue("L{$currentRow}", $grandTotal);
-$sheet->getStyle("A{$currentRow}:L{$currentRow}")->applyFromArray($headerStyle);
-$sheet->getStyle("A{$currentRow}:L{$currentRow}")->getFont()->setBold(true);
-$sheet->getStyle("L{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-
-if ($currentRow >= $headerRow) {
-    $sheet->getStyle("A{$headerRow}:L{$currentRow}")->applyFromArray($borderStyle);
-}
-
-foreach (range('A', 'L') as $column) {
+$sheet->getColumnDimension('A')->setAutoSize(false)->setWidth(2);
+foreach (range('B', 'O') as $column) {
     $sheet->getColumnDimension($column)->setAutoSize(true);
 }
-$sheet->getColumnDimension('A')->setAutoSize(false)->setWidth(5);
-$sheet->getColumnDimension('B')->setAutoSize(false)->setWidth(5);
-
-$productRows = fetchDailySalesByProduct($mysqli, $reportDate);
-$productSheet = $spreadsheet->createSheet();
-$productSheet->setTitle('Daily Sales by Product');
-
-$productSheet->setCellValue('A1', 'Daily Sales by Product');
-$productSheet->getStyle('A1')->getFont()->setBold(true)->setSize(14);
-$productSheet->setCellValue('A2', 'Report Date: ' . $reportDateLabel);
-$productSheet->setCellValue('A3', 'Generated: ' . $generatedAt);
-
-$productHeaderRow = 8;
-$productDataRow = 9;
-$productHeaders = [
-    'Product Code',
-    'Product Description',
-    'Line Item Discount',
-    'Discount',
-    'Unit Price',
-    'Qty',
-    'Amount'
-];
-
-$productSheet->fromArray($productHeaders, null, 'A' . $productHeaderRow);
-$productSheet->getStyle("A{$productHeaderRow}:G{$productHeaderRow}")->applyFromArray($headerStyle);
-$productSheet->getStyle("A{$productHeaderRow}:G{$productHeaderRow}")
-    ->getAlignment()
-    ->setWrapText(true)
-    ->setHorizontal(Alignment::HORIZONTAL_CENTER)
-    ->setVertical(Alignment::VERTICAL_CENTER);
-
-$currentRow = $productDataRow;
-$currentType = null;
-$typeTotals = [
-    'lineitem_discount' => 0,
-    'discount' => 0,
-    'qty' => 0,
-    'amount' => 0
-];
-$grandTotals = [
-    'lineitem_discount' => 0,
-    'discount' => 0,
-    'qty' => 0,
-    'amount' => 0
-];
-
-foreach ($productRows as $row) {
-    $productType = $row['product_type'] !== '' ? $row['product_type'] : 'Unspecified';
-
-    if ($currentType !== null && $productType !== $currentType) {
-        $productSheet->setCellValue("B{$currentRow}", 'Subtotal - ' . $currentType);
-        $productSheet->setCellValue("C{$currentRow}", $typeTotals['lineitem_discount']);
-        $productSheet->setCellValue("D{$currentRow}", $typeTotals['discount']);
-        $productSheet->setCellValue("F{$currentRow}", $typeTotals['qty']);
-        $productSheet->setCellValue("G{$currentRow}", $typeTotals['amount']);
-        $productSheet->getStyle("A{$currentRow}:G{$currentRow}")->applyFromArray($headerStyle);
-        $productSheet->getStyle("A{$currentRow}:G{$currentRow}")->getFont()->setBold(true);
-        $productSheet->getStyle("C{$currentRow}:E{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-        $productSheet->getStyle("G{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-        $currentRow++;
-        $typeTotals = [
-            'lineitem_discount' => 0,
-            'discount' => 0,
-            'qty' => 0,
-            'amount' => 0
-        ];
-    }
-
-    if ($currentType === null || $productType !== $currentType) {
-        $currentType = $productType;
-    }
-
-    $productSheet->setCellValueExplicit("A{$currentRow}", $row['product_code'], DataType::TYPE_STRING);
-    $productSheet->setCellValue("B{$currentRow}", $row['product_description']);
-    $productSheet->setCellValue("C{$currentRow}", $row['lineitem_discount_total']);
-    $productSheet->setCellValue("D{$currentRow}", $row['discount_total']);
-    $productSheet->setCellValue("E{$currentRow}", $row['unit_price']);
-    $productSheet->setCellValue("F{$currentRow}", $row['qty_total']);
-    $productSheet->setCellValue("G{$currentRow}", $row['amount_total']);
-    $productSheet->getStyle("C{$currentRow}:E{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-    $productSheet->getStyle("G{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-
-    $typeTotals['lineitem_discount'] += $row['lineitem_discount_total'];
-    $typeTotals['discount'] += $row['discount_total'];
-    $typeTotals['qty'] += $row['qty_total'];
-    $typeTotals['amount'] += $row['amount_total'];
-
-    $grandTotals['lineitem_discount'] += $row['lineitem_discount_total'];
-    $grandTotals['discount'] += $row['discount_total'];
-    $grandTotals['qty'] += $row['qty_total'];
-    $grandTotals['amount'] += $row['amount_total'];
-
-    $currentRow++;
-}
-
-if ($currentType !== null) {
-    $productSheet->setCellValue("B{$currentRow}", 'Subtotal - ' . $currentType);
-    $productSheet->setCellValue("C{$currentRow}", $typeTotals['lineitem_discount']);
-    $productSheet->setCellValue("D{$currentRow}", $typeTotals['discount']);
-    $productSheet->setCellValue("F{$currentRow}", $typeTotals['qty']);
-    $productSheet->setCellValue("G{$currentRow}", $typeTotals['amount']);
-    $productSheet->getStyle("A{$currentRow}:G{$currentRow}")->applyFromArray($headerStyle);
-    $productSheet->getStyle("A{$currentRow}:G{$currentRow}")->getFont()->setBold(true);
-    $productSheet->getStyle("C{$currentRow}:E{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-    $productSheet->getStyle("G{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-    $currentRow++;
-}
-
-$productSheet->setCellValue("B{$currentRow}", 'Grand Total');
-$productSheet->setCellValue("C{$currentRow}", $grandTotals['lineitem_discount']);
-$productSheet->setCellValue("D{$currentRow}", $grandTotals['discount']);
-$productSheet->setCellValue("F{$currentRow}", $grandTotals['qty']);
-$productSheet->setCellValue("G{$currentRow}", $grandTotals['amount']);
-$productSheet->getStyle("A{$currentRow}:G{$currentRow}")->applyFromArray($headerStyle);
-$productSheet->getStyle("A{$currentRow}:G{$currentRow}")->getFont()->setBold(true);
-$productSheet->getStyle("C{$currentRow}:E{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-$productSheet->getStyle("G{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-
-if ($currentRow >= $productHeaderRow) {
-    $productSheet->getStyle("A{$productHeaderRow}:G{$currentRow}")->applyFromArray($borderStyle);
-}
-
-foreach (range('A', 'G') as $column) {
-    $productSheet->getColumnDimension($column)->setAutoSize(true);
-}
+$sheet->getColumnDimension('I')->setAutoSize(false)->setWidth(40);
 
 $spreadsheet->setActiveSheetIndex(0);
 
@@ -429,7 +264,7 @@ if (ob_get_length()) {
     ob_end_clean();
 }
 
-$filename = 'daily_transaction_' . $reportDate . '.xlsx';
+$filename = 'daily_sales_register_' . $reportDate . '.xlsx';
 header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
 header('Content-Disposition: attachment; filename="' . $filename . '"');
 header('Cache-Control: max-age=0');

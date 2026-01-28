@@ -190,44 +190,45 @@ function buildCustomerDisplayName($row)
 }
 
 $pageError = null;
+$registerRows = [];
 $orders = [];
-$orderList = [];
-$grandTotal = 0;
 $generatedAt = date('Y-m-d H:i:s');
+$totalSales = 0;
+$uniqueOrders = [];
+
+function resolveSalesDateTime($primaryValue, $fallbackValue)
+{
+    $primaryValue = trim((string)$primaryValue);
+    $fallbackValue = trim((string)$fallbackValue);
+    $dateTime = null;
+
+    if ($primaryValue !== '' && $primaryValue !== '0000-00-00 00:00:00') {
+        $dateTime = DateTime::createFromFormat('Y-m-d H:i:s', $primaryValue);
+    }
+    if (!$dateTime && $fallbackValue !== '' && $fallbackValue !== '0000-00-00 00:00:00') {
+        $dateTime = DateTime::createFromFormat('Y-m-d H:i:s', $fallbackValue);
+    }
+
+    return $dateTime ?: null;
+}
 
 if (!isset($mysqli) || !$mysqli) {
     $pageError = 'Database connection unavailable.';
 } else {
     $sql = "SELECT s.order_no,
                    s.customer_code,
-                   s.delivery_instruction,
-                   s.lineitem,
                    s.qty,
                    s.product_code,
                    s.product_description,
-                   s.lineitem_discount,
-                   s.discount,
                    s.unit_price,
                    s.amount,
-                   s.date_delivery,
-                   s.time_delivery,
                    s.date_created,
+                   s.date_time_ordered,
                    s.amt_received,
-                   s.amt_change,
-                   s.void_status,
-                   s.void_remarks,
-                   s.void_authorized_by,
-                   c.storeName,
-                   c.address,
-                   c.firstName,
-                   c.middleName,
-                   c.lastName,
-                   p.uom
+                   s.amt_change
             FROM sales s
-            LEFT JOIN customer_register c ON c.customer_code = s.customer_code
-            LEFT JOIN ice_product p ON p.product_code = s.product_code
             WHERE DATE(s.date_created) = ?
-            ORDER BY s.order_no, s.lineitem";
+            ORDER BY s.date_created, s.order_no, s.lineitem";
     $stmt = $mysqli->prepare($sql);
     if (!$stmt) {
         $pageError = 'Unable to load transactions.';
@@ -239,63 +240,41 @@ if (!isset($mysqli) || !$mysqli) {
                 if ($orderNo === '') {
                     $orderNo = 'UNKNOWN';
                 }
+                $uniqueOrders[$orderNo] = true;
 
-                if (!isset($orders[$orderNo])) {
-                    $orders[$orderNo] = [
-                        'order_no' => $orderNo,
-                        'customer_code' => trim((string)(isset($row['customer_code']) ? $row['customer_code'] : '')),
-                        'customer_name' => buildCustomerDisplayName($row),
-                        'customer_address' => trim((string)(isset($row['address']) ? $row['address'] : '')),
-                        'delivery_instruction' => trim((string)(isset($row['delivery_instruction']) ? $row['delivery_instruction'] : '')),
-                        'date_delivery' => (string)(isset($row['date_delivery']) ? $row['date_delivery'] : ''),
-                        'time_delivery' => (string)(isset($row['time_delivery']) ? $row['time_delivery'] : ''),
-                        'date_created' => (string)(isset($row['date_created']) ? $row['date_created'] : ''),
-                        'discount' => isset($row['discount']) ? (float)$row['discount'] : 0.0,
-                        'amt_received' => isset($row['amt_received']) ? (float)$row['amt_received'] : 0.0,
-                        'amt_change' => isset($row['amt_change']) ? (float)$row['amt_change'] : 0.0,
-                        'void_status' => isset($row['void_status']) ? (int)$row['void_status'] : 0,
-                        'void_remarks' => trim((string)(isset($row['void_remarks']) ? $row['void_remarks'] : '')),
-                        'void_authorized_by' => trim((string)(isset($row['void_authorized_by']) ? $row['void_authorized_by'] : '')),
-                        'items' => [],
-                        'total_qty' => 0,
-                        'total_amount' => 0
-                    ];
-                }
+                $orderedAt = resolveSalesDateTime(
+                    isset($row['date_time_ordered']) ? $row['date_time_ordered'] : '',
+                    isset($row['date_created']) ? $row['date_created'] : ''
+                );
+                $dateLabel = $orderedAt ? $orderedAt->format('Y-m-d') : '';
+                $timeLabel = $orderedAt ? $orderedAt->format('H:i:s') : '';
 
-                $qty = isset($row['qty']) ? (float)$row['qty'] : 0.0;
-                $unitPrice = isset($row['unit_price']) ? (float)$row['unit_price'] : 0.0;
-                $lineDiscount = isset($row['lineitem_discount']) ? (float)$row['lineitem_discount'] : 0.0;
                 $amount = isset($row['amount']) ? (float)$row['amount'] : 0.0;
-                $gross = $qty * $unitPrice;
-                $unitDiscount = $qty > 0 ? $lineDiscount / $qty : 0.0;
+                $amtReceived = isset($row['amt_received']) ? (float)$row['amt_received'] : 0.0;
+                $amtChange = isset($row['amt_change']) ? (float)$row['amt_change'] : 0.0;
+                $cash = $amtReceived - $amtChange;
+                if ($cash < 0) {
+                    $cash = 0;
+                }
+                $onAccount = $amtReceived <= 0 ? $amount : 0;
 
-                $orders[$orderNo]['items'][] = [
-                    'code' => (string)(isset($row['product_code']) ? $row['product_code'] : ''),
-                    'description' => (string)(isset($row['product_description']) ? $row['product_description'] : ''),
-                    'uom' => (string)(isset($row['uom']) ? $row['uom'] : ''),
-                    'qty' => $qty,
-                    'unit_price' => $unitPrice,
-                    'unit_discount' => $unitDiscount,
-                    'line_discount' => $lineDiscount,
-                    'gross_amount' => $gross,
-                    'amount' => $amount
+                $registerRows[] = [
+                    'date' => $dateLabel,
+                    'time' => $timeLabel,
+                    'order_no' => $orderNo,
+                    'customer_code' => trim((string)(isset($row['customer_code']) ? $row['customer_code'] : '')),
+                    'qty' => isset($row['qty']) ? (float)$row['qty'] : 0.0,
+                    'product_code' => (string)(isset($row['product_code']) ? $row['product_code'] : ''),
+                    'product_description' => (string)(isset($row['product_description']) ? $row['product_description'] : ''),
+                    'unit_price' => isset($row['unit_price']) ? (float)$row['unit_price'] : 0.0,
+                    'amount' => $amount,
+                    'amt_received' => $amtReceived,
+                    'amt_change' => $amtChange,
+                    'cash' => $cash,
+                    'on_account' => $onAccount
                 ];
 
-                $orders[$orderNo]['total_qty'] += $qty;
-                $orders[$orderNo]['total_amount'] += $amount;
-                $grandTotal += $amount;
-
-                if (isset($row['void_status']) && (int)$row['void_status'] === 1) {
-                    $orders[$orderNo]['void_status'] = 1;
-                }
-                $voidRemarks = trim((string)(isset($row['void_remarks']) ? $row['void_remarks'] : ''));
-                if ($orders[$orderNo]['void_remarks'] === '' && $voidRemarks !== '') {
-                    $orders[$orderNo]['void_remarks'] = $voidRemarks;
-                }
-                $voidAuthorizedBy = trim((string)(isset($row['void_authorized_by']) ? $row['void_authorized_by'] : ''));
-                if ($orders[$orderNo]['void_authorized_by'] === '' && $voidAuthorizedBy !== '') {
-                    $orders[$orderNo]['void_authorized_by'] = $voidAuthorizedBy;
-                }
+                $totalSales += $amount;
             }
             $result->free();
         }
@@ -303,14 +282,23 @@ if (!isset($mysqli) || !$mysqli) {
     }
 }
 
-$orderList = array_values($orders);
+$transactionCount = count($uniqueOrders);
+$dayCount = 1;
+$averageDailySales = $dayCount > 0 ? $totalSales / $dayCount : 0;
+$averageDailyTransactions = $dayCount > 0 ? $transactionCount / $dayCount : 0;
+
 $reportDateLabel = date('F d, Y', strtotime($reportDate));
+$reportRangeLabel = 'from ' . date('F d', strtotime($reportDate)) . ' to ' . date('d, Y', strtotime($reportDate));
 
 $reportMeta = [
     'report_date' => $reportDate,
     'generated_at' => $generatedAt,
-    'records' => count($orderList),
-    'grand_total' => $grandTotal
+    'records' => count($registerRows),
+    'total_sales' => $totalSales,
+    'transaction_count' => $transactionCount,
+    'average_daily_sales' => $averageDailySales,
+    'average_daily_transactions' => $averageDailyTransactions,
+    'report_range' => $reportRangeLabel
 ];
 
 ob_start();
@@ -333,6 +321,33 @@ ob_start();
     .report-card h4 {
         font-size: 2rem;
         margin: 0;
+    }
+    .summary-table {
+        width: auto;
+        min-width: 280px;
+    }
+    .summary-table td,
+    .summary-table th {
+        padding: 0.35rem 0.6rem;
+    }
+    .summary-table .value {
+        text-align: right;
+        min-width: 140px;
+    }
+    .daily-register-head-top {
+        background: #e5e7eb;
+        color: #475569;
+        font-size: 0.75rem;
+        font-weight: 600;
+        white-space: nowrap;
+    }
+    .daily-register-head-bottom {
+        background: #e5e7eb;
+        color: #dc2626;
+        font-size: 0.7rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        white-space: nowrap;
     }
     .pos-receipt {
         width: 80mm;
@@ -415,101 +430,120 @@ $styles = ob_get_clean();
 ob_start();
 ?>
 <div class="container-fluid py-4">
-    <div class="row mb-4 align-items-center">
+    <div class="row mb-4 align-items-start">
         <div class="col-lg-6">
-            <h3 class="mb-1">Daily Transaction</h3>
-            <p class="text-muted mb-0">Orders recorded on <?php echo htmlspecialchars($reportDateLabel); ?>.</p>
+            <h3 class="mb-1">Daily Sales Register</h3>
+            <p class="text-muted mb-1"><?php echo htmlspecialchars($reportMeta['report_range']); ?></p>
+            <p class="text-muted small mb-0">Generated: <?php echo htmlspecialchars($reportMeta['generated_at']); ?></p>
         </div>
         <div class="col-lg-6 mt-3 mt-lg-0">
-            <form class="row g-2 align-items-end justify-content-end" method="get" novalidate>
-                <div class="col-sm-7 col-md-6">
-                    <label for="report-date" class="form-label text-muted small mb-1">Transaction Date</label>
-                    <input type="date" id="report-date" name="date" class="form-control" value="<?php echo htmlspecialchars($reportMeta['report_date']); ?>">
+            <div class="d-flex flex-column gap-3 align-items-lg-end">
+                <form class="row g-2 align-items-end justify-content-lg-end" method="get" novalidate>
+                    <div class="col-sm-7 col-md-6">
+                        <label for="report-date" class="form-label text-muted small mb-1">Transaction Date</label>
+                        <input type="date" id="report-date" name="date" class="form-control" value="<?php echo htmlspecialchars($reportMeta['report_date']); ?>">
+                    </div>
+                    <div class="col-auto">
+                        <button type="submit" class="btn btn-primary">View</button>
+                    </div>
+                    <div class="col-auto">
+                        <a class="btn btn-outline-secondary" href="print_daily_transaction.php?date=<?php echo urlencode($reportMeta['report_date']); ?>">
+                            Export Excel
+                        </a>
+                    </div>
+                </form>
+                <div class="table-responsive">
+                    <table class="table table-sm table-bordered summary-table mb-0">
+                        <tbody>
+                            <tr>
+                                <th class="text-uppercase small text-muted">Total Sales</th>
+                                <td class="value"><?php echo number_format($reportMeta['total_sales'], 2); ?></td>
+                            </tr>
+                            <tr>
+                                <th class="text-uppercase small text-muted">Total Transaction Count</th>
+                                <td class="value"><?php echo number_format($reportMeta['transaction_count']); ?></td>
+                            </tr>
+                            <tr>
+                                <th class="text-uppercase small text-muted">Average Daily Sales</th>
+                                <td class="value"><?php echo number_format($reportMeta['average_daily_sales'], 2); ?></td>
+                            </tr>
+                            <tr>
+                                <th class="text-uppercase small text-muted">Average Daily Transaction Count</th>
+                                <td class="value"><?php echo number_format($reportMeta['average_daily_transactions']); ?></td>
+                            </tr>
+                        </tbody>
+                    </table>
                 </div>
-                <div class="col-auto">
-                    <button type="submit" class="btn btn-primary">View</button>
-                </div>
-                <div class="col-auto">
-                    <a class="btn btn-outline-secondary" href="print_daily_transaction.php?date=<?php echo urlencode($reportMeta['report_date']); ?>">
-                        Export Excel
-                    </a>
-                </div>
-                <div class="col-12 text-end">
-                    <span class="text-muted small">Generated: <?php echo htmlspecialchars($reportMeta['generated_at']); ?></span>
-                </div>
-            </form>
+            </div>
         </div>
     </div>
 
     <?php if ($pageError !== null): ?>
         <div class="alert alert-danger"><?php echo htmlspecialchars($pageError); ?></div>
     <?php else: ?>
-        <div class="row g-3 mb-4">
-            <div class="col-md-4">
-                <div class="report-card">
-                    <span class="label">Total Orders</span>
-                    <h4><?php echo number_format($reportMeta['records']); ?></h4>
-                    <p class="text-muted mb-0">Orders captured for <?php echo htmlspecialchars($reportDateLabel); ?>.</p>
-                </div>
-            </div>
-            <div class="col-md-4">
-                <div class="report-card">
-                    <span class="label">Grand Total</span>
-                    <h4><?php echo number_format($reportMeta['grand_total'], 2); ?></h4>
-                    <p class="text-muted mb-0">Sum of all order amounts.</p>
-                </div>
-            </div>
-        </div>
-
         <div class="card custom-card">
             <div class="card-header d-flex justify-content-between align-items-center">
-                <h5 class="card-title mb-0">Daily Transactions</h5>
-                <span class="text-muted small"><?php echo $reportMeta['records']; ?> order(s)</span>
+                <h5 class="card-title mb-0">Daily Sales Register</h5>
+                <span class="text-muted small"><?php echo $reportMeta['records']; ?> record(s)</span>
             </div>
             <div class="card-body">
-                <?php if (empty($orderList)): ?>
+                <?php if (empty($registerRows)): ?>
                     <p class="text-muted mb-0">No transactions were recorded for the selected date.</p>
                 <?php else: ?>
                     <div class="table-responsive daily-transaction-table">
                         <table id="daily-transaction-table" class="table table-striped align-middle mb-0 w-100">
                             <thead>
-                                <tr>
-                                    <th>Order No</th>
-                                    <th>Customer</th>
-                                    <th class="text-end">Total Qty</th>
-                                    <th class="text-end">Total Amount</th>
-                                    <th>Date Created</th>
-                                    <th class="text-center">Action</th>
+                                <tr class="daily-register-head-top text-center align-middle">
+                                    <th>No.</th>
+                                    <th>sales.date_time_ordered</th>
+                                    <th>sales.date_time_ordered</th>
+                                    <th>sales.order_no</th>
+                                    <th>sales.customer_code</th>
+                                    <th class="text-end">sales.qty</th>
+                                    <th>sales.product_code</th>
+                                    <th>sales.product_description</th>
+                                    <th class="text-end">sales.unit_price</th>
+                                    <th class="text-end">sales.amount</th>
+                                    <th class="text-end">sales.amt_received</th>
+                                    <th class="text-end">sales.amt_change</th>
+                                    <th class="text-end">sales.amt_received - sales.amt_change</th>
+                                    <th class="text-end">sales.amt_received=0; display amount</th>
+                                </tr>
+                                <tr class="daily-register-head-bottom text-center align-middle">
+                                    <th>&nbsp;</th>
+                                    <th>Date</th>
+                                    <th>Time</th>
+                                    <th>DR No.</th>
+                                    <th>Customer Code</th>
+                                    <th class="text-end">Quantity</th>
+                                    <th>Product Code</th>
+                                    <th>Product Description</th>
+                                    <th class="text-end">Unit Price</th>
+                                    <th class="text-end">Amount</th>
+                                    <th class="text-end">&nbsp;</th>
+                                    <th class="text-end">&nbsp;</th>
+                                    <th class="text-end">Cash</th>
+                                    <th class="text-end">On Account</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php foreach ($orderList as $order): ?>
+                                <?php foreach ($registerRows as $index => $row): ?>
+                                    <?php $orderNoDisplay = $row['order_no'] !== '' ? 'DR' . $row['order_no'] : ''; ?>
                                     <tr>
-                                        <td>
-                                            <div class="fw-semibold">
-                                                <?php echo htmlspecialchars('DR' . $order['order_no']); ?>
-                                                <?php if (!empty($order['void_status'])): ?>
-                                                    <span class="badge bg-danger ms-2">Voided</span>
-                                                <?php endif; ?>
-                                            </div>
-                                        </td>
-                                        <td>
-                                            <div class="fw-semibold"><?php echo htmlspecialchars($order['customer_name'] !== '' ? $order['customer_name'] : $order['customer_code']); ?></div>
-                                            <div class="text-muted small"><?php echo htmlspecialchars($order['customer_code']); ?></div>
-                                        </td>
-                                        <td class="text-end"><?php echo number_format($order['total_qty'], 2); ?></td>
-                                        <td class="text-end"><?php echo number_format($order['total_amount'], 2); ?></td>
-                                        <td><?php echo htmlspecialchars($order['date_created']); ?></td>
-                                        <td class="text-center">
-                                            <div class="d-inline-flex flex-wrap gap-2 justify-content-center">
-                                                <button type="button" class="btn btn-sm btn-outline-primary pos-print-order" data-order-no="<?php echo htmlspecialchars($order['order_no']); ?>">
-                                                    Print
-                                                </button>
-                                                <button type="button" class="btn btn-sm btn-outline-danger pos-void-order" data-order-no="<?php echo htmlspecialchars($order['order_no']); ?>" <?php echo !empty($order['void_status']) ? 'disabled aria-disabled="true"' : ''; ?>>
-                                                    Void
-                                                </button>
-                                            </div>
-                                        </td>
+                                        <td class="text-center"><?php echo $index + 1; ?></td>
+                                        <td><?php echo htmlspecialchars($row['date']); ?></td>
+                                        <td><?php echo htmlspecialchars($row['time']); ?></td>
+                                        <td><?php echo htmlspecialchars($orderNoDisplay); ?></td>
+                                        <td><?php echo htmlspecialchars($row['customer_code']); ?></td>
+                                        <td class="text-end"><?php echo number_format($row['qty'], 2); ?></td>
+                                        <td><?php echo htmlspecialchars($row['product_code']); ?></td>
+                                        <td><?php echo htmlspecialchars($row['product_description']); ?></td>
+                                        <td class="text-end"><?php echo number_format($row['unit_price'], 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($row['amount'], 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($row['amt_received'], 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($row['amt_change'], 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($row['cash'], 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($row['on_account'], 2); ?></td>
                                     </tr>
                                 <?php endforeach; ?>
                             </tbody>
@@ -519,40 +553,6 @@ ob_start();
             </div>
         </div>
     <?php endif; ?>
-</div>
-
-<div id="daily-transaction-print-area" class="pos-print-area" aria-hidden="true"></div>
-
-<div class="modal fade" id="void-order-modal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Void Order</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-            </div>
-            <div class="modal-body">
-                <p class="text-muted small mb-3">Order: <span id="void-order-label" class="fw-semibold"></span></p>
-                <div class="mb-3">
-                    <label class="form-label fw-semibold" for="void-reason">Reason for voiding</label>
-                    <textarea class="form-control" id="void-reason" rows="3" maxlength="100" placeholder="Enter reason for voiding"></textarea>
-                </div>
-                <div class="mb-3">
-                    <label class="form-label fw-semibold" for="void-admin-username">Admin Username</label>
-                    <input type="text" class="form-control" id="void-admin-username" name="void_admin_user" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true" data-form-type="other" placeholder="Admin username">
-                </div>
-                <div class="mb-3">
-                    <label class="form-label fw-semibold" for="void-admin-password">Admin Password</label>
-                    <input type="password" class="form-control" id="void-admin-password" name="void_admin_pass" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" data-form-type="other" placeholder="Admin password">
-                </div>
-                <div class="alert alert-danger d-none" id="void-order-error"></div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button>
-                <button type="button" class="btn btn-outline-danger" id="void-order-cancel-only">Cancel Order</button>
-                <button type="button" class="btn btn-danger" id="void-order-confirm">Void and Reorder</button>
-            </div>
-        </div>
-    </div>
 </div>
 <?php
 $content = ob_get_clean();
@@ -598,15 +598,15 @@ $scriptsBuffer = function () use ($ordersJson, $baseUrl) {
                 lengthChange: false,
                 ordering: false,
                 paging: true,
-                scrollX: false,
+                scrollX: true,
                 scrollY: '60vh',
                 scrollCollapse: true,
                 dom: "<'row align-items-center mb-2'<'col-sm-6'f><'col-sm-6 text-end'>>rt<'row align-items-center mt-2'<'col-sm-6'i><'col-sm-6'p>>",
                 language: {
                     search: 'Filter:',
-                    emptyTable: 'No transactions for this date.',
-                    info: 'Showing _START_ to _END_ of _TOTAL_ orders',
-                    infoEmpty: 'Showing 0 to 0 of 0 orders',
+                    emptyTable: 'No records for this date.',
+                    info: 'Showing _START_ to _END_ of _TOTAL_ records',
+                    infoEmpty: 'Showing 0 to 0 of 0 records',
                     paginate: { previous: 'Previous', next: 'Next' }
                 },
                 initComplete: function () {
