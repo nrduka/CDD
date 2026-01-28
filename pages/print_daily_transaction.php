@@ -129,10 +129,10 @@ $spreadsheet = new Spreadsheet();
 $sheet = $spreadsheet->getActiveSheet();
 $sheet->setTitle('Daily Sales Register');
 
-$sheet->setCellValue('B1', 'DAILY SALES REGISTER');
-$sheet->getStyle('B1')->getFont()->setBold(true)->setSize(14);
-$sheet->setCellValue('B2', $reportRangeLabel);
-$sheet->setCellValue('B3', 'Generated: ' . $generatedAt);
+$sheet->setCellValue('A1', 'DAILY SALES REGISTER');
+$sheet->getStyle('A1')->getFont()->setBold(true)->setSize(14);
+$sheet->setCellValue('A2', $reportRangeLabel);
+$sheet->setCellValue('A3', 'Generated: ' . $generatedAt);
 
 $headerStyle = [
     'font' => ['bold' => true],
@@ -146,52 +146,45 @@ $borderStyle = [
     'borders' => [
         'allBorders' => [
             'borderStyle' => Border::BORDER_THIN,
-            'color' => ['rgb' => 'cbd5e1']
+            'color' => ['rgb' => '000000']
+        ]
+    ]
+];
+$summaryBorderStyle = [
+    'borders' => [
+        'outline' => [
+            'borderStyle' => Border::BORDER_THIN,
+            'color' => ['rgb' => '000000']
         ]
     ]
 ];
 
 $currencyFormat = '#,##0.00';
 
-$sheet->setCellValue('J1', 'TOTAL SALES');
+$sheet->setCellValue('I1', 'TOTAL SALES');
 $sheet->setCellValue('K1', $totalSales);
-$sheet->setCellValue('J2', 'TOTAL TRANSACTION COUNT');
+$sheet->setCellValue('I2', 'TOTAL TRANSACTION COUNT');
 $sheet->setCellValue('K2', $transactionCount);
-$sheet->setCellValue('J3', 'AVERAGE DAILY SALES');
+$sheet->setCellValue('I3', 'AVERAGE DAILY SALES');
 $sheet->setCellValue('K3', $averageDailySales);
-$sheet->setCellValue('J4', 'AVERAGE DAILY TRANSACTION COUNT');
+$sheet->setCellValue('I4', 'AVERAGE DAILY TRANSACTION COUNT');
 $sheet->setCellValue('K4', $averageDailyTransactions);
-$sheet->getStyle('J1:K4')->applyFromArray($borderStyle);
-$sheet->getStyle('J1:J4')->getFont()->setBold(true);
+$sheet->getStyle('I1:K1')->applyFromArray($summaryBorderStyle);
+$sheet->getStyle('I2:K2')->applyFromArray($summaryBorderStyle);
+$sheet->getStyle('I3:K3')->applyFromArray($summaryBorderStyle);
+$sheet->getStyle('I4:K4')->applyFromArray($summaryBorderStyle);
+$sheet->getStyle('I1:I4')->getFont()->setBold(true);
 $sheet->getStyle('K1')->getNumberFormat()->setFormatCode($currencyFormat);
 $sheet->getStyle('K2')->getNumberFormat()->setFormatCode('0');
 $sheet->getStyle('K3')->getNumberFormat()->setFormatCode($currencyFormat);
 $sheet->getStyle('K4')->getNumberFormat()->setFormatCode('0');
 $sheet->getStyle('K1:K4')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
 
-$headerRow = 8;
-$subHeaderRow = 9;
+$headerRow = 9;
 $dataRow = 10;
 
-$topHeaders = [
+$headers = [
     'NO.',
-    'sales.date_time_ordered',
-    'sales.date_time_ordered',
-    'sales.order_no',
-    'sales.customer_code',
-    'sales.qty',
-    'sales.product_code',
-    'sales.product_description',
-    'sales.unit_price',
-    'sales.amount',
-    'sales.amt_received',
-    'sales.amt_change',
-    'sales.amt_received - sales.amt_change',
-    'sales.amt_received=0; display amount'
-];
-
-$subHeaders = [
-    '',
     'DATE',
     'TIME',
     'DR NO.',
@@ -201,62 +194,88 @@ $subHeaders = [
     'PRODUCT DESCRIPTION',
     'UNIT PRICE',
     'AMOUNT',
-    '',
-    '',
+    'AMOUNT RECEIVED',
+    'CHANGE',
     'CASH',
     'ON ACCOUNT'
 ];
 
-$sheet->fromArray($topHeaders, null, 'B' . $headerRow);
-$sheet->fromArray($subHeaders, null, 'B' . $subHeaderRow);
-$sheet->getStyle("B{$headerRow}:O{$subHeaderRow}")->applyFromArray($headerStyle);
-$sheet->getStyle("B{$headerRow}:O{$subHeaderRow}")
+$sheet->fromArray($headers, null, 'A' . $headerRow);
+$sheet->getStyle("A{$headerRow}:N{$headerRow}")->applyFromArray($headerStyle);
+$sheet->getStyle("A{$headerRow}:N{$headerRow}")
     ->getAlignment()
     ->setWrapText(true)
     ->setHorizontal(Alignment::HORIZONTAL_CENTER)
     ->setVertical(Alignment::VERTICAL_CENTER);
-$sheet->getStyle("B{$headerRow}:O{$headerRow}")->getFont()->getColor()->setRGB('475569');
-$sheet->getStyle("B{$subHeaderRow}:O{$subHeaderRow}")->getFont()->getColor()->setRGB('DC2626');
+$sheet->getStyle("A{$headerRow}:N{$headerRow}")->getFont()->getColor()->setRGB('000000');
 
 $currentRow = $dataRow;
 $lineNumber = 1;
 foreach ($registerRows as $row) {
     $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
     $orderNoDisplay = $orderNo !== '' ? 'DR' . $orderNo : '';
-    $sheet->setCellValue("B{$currentRow}", $lineNumber);
-    $sheet->setCellValueExplicit("C{$currentRow}", $row['date_label'], DataType::TYPE_STRING);
-    $sheet->setCellValueExplicit("D{$currentRow}", $row['time_label'], DataType::TYPE_STRING);
-    $sheet->setCellValueExplicit("E{$currentRow}", $orderNoDisplay, DataType::TYPE_STRING);
-    $sheet->setCellValueExplicit("F{$currentRow}", $row['customer_code'], DataType::TYPE_STRING);
-    $sheet->setCellValue("G{$currentRow}", $row['qty']);
-    $sheet->setCellValueExplicit("H{$currentRow}", $row['product_code'], DataType::TYPE_STRING);
-    $sheet->setCellValue("I{$currentRow}", $row['product_description']);
-    $sheet->setCellValue("J{$currentRow}", $row['unit_price']);
-    $sheet->setCellValue("K{$currentRow}", $row['amount']);
-    $sheet->setCellValue("L{$currentRow}", $row['amt_received']);
-    $sheet->setCellValue("M{$currentRow}", $row['amt_change']);
-    $sheet->setCellValue("N{$currentRow}", "=L{$currentRow}-M{$currentRow}");
-    $sheet->setCellValue("O{$currentRow}", "=IF(L{$currentRow}=0,K{$currentRow},0)");
+    $sheet->setCellValue("A{$currentRow}", $lineNumber);
+    $sheet->setCellValueExplicit("B{$currentRow}", $row['date_label'], DataType::TYPE_STRING);
+    $sheet->setCellValueExplicit("C{$currentRow}", $row['time_label'], DataType::TYPE_STRING);
+    $sheet->setCellValueExplicit("D{$currentRow}", $orderNoDisplay, DataType::TYPE_STRING);
+    $sheet->setCellValueExplicit("E{$currentRow}", $row['customer_code'], DataType::TYPE_STRING);
+    $sheet->setCellValue("F{$currentRow}", $row['qty']);
+    $sheet->setCellValueExplicit("G{$currentRow}", $row['product_code'], DataType::TYPE_STRING);
+    $sheet->setCellValue("H{$currentRow}", $row['product_description']);
+    $sheet->setCellValue("I{$currentRow}", $row['unit_price']);
+    $sheet->setCellValue("J{$currentRow}", $row['amount']);
+    $sheet->setCellValue("K{$currentRow}", $row['amt_received']);
+    $sheet->setCellValue("L{$currentRow}", $row['amt_change']);
+    $sheet->setCellValue("M{$currentRow}", "=K{$currentRow}-L{$currentRow}");
+    $sheet->setCellValue("N{$currentRow}", "=IF(K{$currentRow}=0,J{$currentRow},0)");
     $currentRow++;
     $lineNumber++;
 }
 
-$lastDataRow = $currentRow - 1;
-if ($lastDataRow < $subHeaderRow) {
-    $lastDataRow = $subHeaderRow;
-}
-if ($lastDataRow >= $headerRow) {
-    $sheet->getStyle("B{$headerRow}:O{$lastDataRow}")->applyFromArray($borderStyle);
-}
-if ($lastDataRow >= $dataRow) {
-    $sheet->getStyle("G{$dataRow}:O{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+$lastDetailRow = $currentRow - 1;
+$totalRow = $currentRow;
+$sheet->setCellValue("H{$totalRow}", 'TOTAL');
+$sheet->getStyle("A{$totalRow}:N{$totalRow}")->getFont()->setBold(true);
+if ($lastDetailRow >= $dataRow) {
+    $sheet->setCellValue("J{$totalRow}", "=SUM(J{$dataRow}:J{$lastDetailRow})");
+    $sheet->setCellValue("K{$totalRow}", "=SUM(K{$dataRow}:K{$lastDetailRow})");
+    $sheet->setCellValue("L{$totalRow}", "=SUM(L{$dataRow}:L{$lastDetailRow})");
+    $sheet->setCellValue("M{$totalRow}", "=SUM(M{$dataRow}:M{$lastDetailRow})");
+    $sheet->setCellValue("N{$totalRow}", "=SUM(N{$dataRow}:N{$lastDetailRow})");
+} else {
+    $sheet->setCellValue("J{$totalRow}", 0);
+    $sheet->setCellValue("K{$totalRow}", 0);
+    $sheet->setCellValue("L{$totalRow}", 0);
+    $sheet->setCellValue("M{$totalRow}", 0);
+    $sheet->setCellValue("N{$totalRow}", 0);
 }
 
-$sheet->getColumnDimension('A')->setAutoSize(false)->setWidth(2);
-foreach (range('B', 'O') as $column) {
+$lastDataRow = $totalRow;
+if ($lastDataRow >= $headerRow) {
+    $sheet->getStyle("A{$headerRow}:N{$lastDataRow}")->applyFromArray($borderStyle);
+}
+if ($lastDataRow >= $dataRow) {
+    $sheet->getStyle("F{$dataRow}:F{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+    $sheet->getStyle("I{$dataRow}:N{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+}
+$sheet->getStyle("B{$headerRow}:G{$lastDataRow}")
+    ->getAlignment()
+    ->setHorizontal(Alignment::HORIZONTAL_CENTER)
+    ->setVertical(Alignment::VERTICAL_CENTER);
+
+foreach (range('A', 'N') as $column) {
+    if (in_array($column, ['B', 'C', 'D', 'E', 'F', 'G'], true)) {
+        $sheet->getColumnDimension($column)->setAutoSize(false)->setWidth(15);
+        continue;
+    }
+    if (in_array($column, ['I', 'J', 'K', 'L', 'M', 'N'], true)) {
+        $sheet->getColumnDimension($column)->setAutoSize(false)->setWidth(20);
+        continue;
+    }
     $sheet->getColumnDimension($column)->setAutoSize(true);
 }
-$sheet->getColumnDimension('I')->setAutoSize(false)->setWidth(40);
+$sheet->getColumnDimension('A')->setAutoSize(false)->setWidth(5);
+$sheet->getColumnDimension('H')->setAutoSize(false)->setWidth(40);
 
 $spreadsheet->setActiveSheetIndex(0);
 

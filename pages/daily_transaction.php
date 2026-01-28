@@ -493,24 +493,8 @@ ob_start();
                     <div class="table-responsive daily-transaction-table">
                         <table id="daily-transaction-table" class="table table-striped align-middle mb-0 w-100">
                             <thead>
-                                <tr class="daily-register-head-top text-center align-middle">
-                                    <th>No.</th>
-                                    <th>sales.date_time_ordered</th>
-                                    <th>sales.date_time_ordered</th>
-                                    <th>sales.order_no</th>
-                                    <th>sales.customer_code</th>
-                                    <th class="text-end">sales.qty</th>
-                                    <th>sales.product_code</th>
-                                    <th>sales.product_description</th>
-                                    <th class="text-end">sales.unit_price</th>
-                                    <th class="text-end">sales.amount</th>
-                                    <th class="text-end">sales.amt_received</th>
-                                    <th class="text-end">sales.amt_change</th>
-                                    <th class="text-end">sales.amt_received - sales.amt_change</th>
-                                    <th class="text-end">sales.amt_received=0; display amount</th>
-                                </tr>
                                 <tr class="daily-register-head-bottom text-center align-middle">
-                                    <th>&nbsp;</th>
+                                    <th>No.</th>
                                     <th>Date</th>
                                     <th>Time</th>
                                     <th>DR No.</th>
@@ -520,8 +504,8 @@ ob_start();
                                     <th>Product Description</th>
                                     <th class="text-end">Unit Price</th>
                                     <th class="text-end">Amount</th>
-                                    <th class="text-end">&nbsp;</th>
-                                    <th class="text-end">&nbsp;</th>
+                                    <th class="text-end">Amount Received</th>
+                                    <th class="text-end">Change</th>
                                     <th class="text-end">Cash</th>
                                     <th class="text-end">On Account</th>
                                 </tr>
