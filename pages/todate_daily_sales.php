@@ -46,85 +46,93 @@ if ($startDate > $endDate) {
 
 $generatedAt = date('Y-m-d H:i:s');
 $pageError = null;
-$salesRows = [];
-$groupedSales = [];
-$dateTotals = [];
-$grandTotals = [
-    'transactions' => 0,
-    'lineitem_discount' => 0,
-    'discount' => 0,
-    'qty' => 0,
-    'amount' => 0
-];
+$registerRows = [];
+$totalSales = 0;
+$uniqueOrders = [];
 
 if (!isset($mysqli) || !$mysqli) {
     $pageError = 'Database connection unavailable.';
 } else {
-    $salesRows = fetchToDateDailySales($mysqli, $startDate, $endDate);
-    foreach ($salesRows as $row) {
-        $dateKey = $row['sale_date'];
-        if (!isset($groupedSales[$dateKey])) {
-            $groupedSales[$dateKey] = [];
-            $dateTotals[$dateKey] = [
-                'transactions' => 0,
-                'lineitem_discount' => 0,
-                'discount' => 0,
-                'qty' => 0,
-                'amount' => 0
-            ];
+    $registerRows = fetchToDateRegisterRows($mysqli, $startDate, $endDate);
+    foreach ($registerRows as $row) {
+        $totalSales += isset($row['amount']) ? (float)$row['amount'] : 0;
+        $orderKey = isset($row['order_no']) ? (string)$row['order_no'] : '';
+        if ($orderKey !== '') {
+            $uniqueOrders[$orderKey] = true;
         }
-        $groupedSales[$dateKey][] = $row;
-        $dateTotals[$dateKey]['transactions'] += $row['total_transactions'];
-        $dateTotals[$dateKey]['lineitem_discount'] += $row['lineitem_discount'];
-        $dateTotals[$dateKey]['discount'] += $row['discount'];
-        $dateTotals[$dateKey]['qty'] += $row['qty'];
-        $dateTotals[$dateKey]['amount'] += $row['amount'];
-
-        $grandTotals['transactions'] += $row['total_transactions'];
-        $grandTotals['lineitem_discount'] += $row['lineitem_discount'];
-        $grandTotals['discount'] += $row['discount'];
-        $grandTotals['qty'] += $row['qty'];
-        $grandTotals['amount'] += $row['amount'];
     }
-    ksort($groupedSales);
 }
 
-function fetchToDateDailySales($mysqli, $startDate, $endDate)
+function resolveSalesDateTime($primaryValue, $fallbackValue)
+{
+    // Resolve to the first valid sales timestamp.
+    $primaryValue = trim((string)$primaryValue);
+    $fallbackValue = trim((string)$fallbackValue);
+    $dateTime = null;
+
+    if ($primaryValue !== '' && $primaryValue !== '0000-00-00 00:00:00') {
+        $dateTime = DateTime::createFromFormat('Y-m-d H:i:s', $primaryValue);
+    }
+    if (!$dateTime && $fallbackValue !== '' && $fallbackValue !== '0000-00-00 00:00:00') {
+        $dateTime = DateTime::createFromFormat('Y-m-d H:i:s', $fallbackValue);
+    }
+
+    return $dateTime ?: null;
+}
+
+function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
 {
     $rows = [];
-    $sql = "SELECT DATE(s.date_created) AS sale_date,
+    $sql = "SELECT s.order_no,
+                   s.customer_code,
+                   s.qty,
                    s.product_code,
-                   COALESCE(p.product_description, s.product_description) AS product_description,
-                   COALESCE(p.unit_price, s.unit_price) AS unit_price,
-                   COUNT(DISTINCT s.order_no) AS total_transactions,
-                   SUM(COALESCE(s.lineitem_discount, 0)) AS lineitem_discount_total,
-                   SUM(COALESCE(s.discount, 0)) AS discount_total,
-                   SUM(COALESCE(s.qty, 0)) AS qty_total,
-                   SUM(COALESCE(s.amount, 0)) AS amount_total
+                   s.product_description,
+                   s.unit_price,
+                   s.amount,
+                   s.date_created,
+                   s.date_time_ordered,
+                   s.amt_received,
+                   s.amt_change
             FROM sales s
-            LEFT JOIN ice_product p ON p.product_code = s.product_code
             WHERE DATE(s.date_created) BETWEEN ? AND ?
-            GROUP BY DATE(s.date_created),
-                     s.product_code,
-                     COALESCE(p.product_description, s.product_description),
-                     COALESCE(p.unit_price, s.unit_price)
-            ORDER BY DATE(s.date_created), s.product_code";
+            ORDER BY s.date_created, s.order_no, s.lineitem";
 
     $stmt = $mysqli->prepare($sql);
     if ($stmt) {
         $stmt->bind_param('ss', $startDate, $endDate);
         if ($stmt->execute() && ($result = $stmt->get_result())) {
             while ($row = $result->fetch_assoc()) {
+                $orderedAt = resolveSalesDateTime(
+                    isset($row['date_time_ordered']) ? $row['date_time_ordered'] : '',
+                    isset($row['date_created']) ? $row['date_created'] : ''
+                );
+                $dateLabel = $orderedAt ? $orderedAt->format('Y-m-d') : '';
+                $timeLabel = $orderedAt ? $orderedAt->format('H:i:s') : '';
+
+                $amount = isset($row['amount']) ? (float)$row['amount'] : 0.0;
+                $amtReceived = isset($row['amt_received']) ? (float)$row['amt_received'] : 0.0;
+                $amtChange = isset($row['amt_change']) ? (float)$row['amt_change'] : 0.0;
+                $cash = $amtReceived - $amtChange;
+                if ($cash < 0) {
+                    $cash = 0;
+                }
+                $onAccount = $amtReceived <= 0 ? $amount : 0;
+
                 $rows[] = [
-                    'sale_date' => isset($row['sale_date']) ? (string)$row['sale_date'] : '',
                     'product_code' => isset($row['product_code']) ? (string)$row['product_code'] : '',
                     'product_description' => isset($row['product_description']) ? (string)$row['product_description'] : '',
-                    'total_transactions' => isset($row['total_transactions']) ? (int)$row['total_transactions'] : 0,
-                    'lineitem_discount' => isset($row['lineitem_discount_total']) ? (float)$row['lineitem_discount_total'] : 0,
-                    'discount' => isset($row['discount_total']) ? (float)$row['discount_total'] : 0,
-                    'qty' => isset($row['qty_total']) ? (float)$row['qty_total'] : 0,
-                    'unit_price' => isset($row['unit_price']) ? (float)$row['unit_price'] : 0,
-                    'amount' => isset($row['amount_total']) ? (float)$row['amount_total'] : 0
+                    'order_no' => isset($row['order_no']) ? (string)$row['order_no'] : '',
+                    'customer_code' => isset($row['customer_code']) ? (string)$row['customer_code'] : '',
+                    'qty' => isset($row['qty']) ? (float)$row['qty'] : 0.0,
+                    'unit_price' => isset($row['unit_price']) ? (float)$row['unit_price'] : 0.0,
+                    'amount' => $amount,
+                    'amt_received' => $amtReceived,
+                    'amt_change' => $amtChange,
+                    'cash' => $cash,
+                    'on_account' => $onAccount,
+                    'date' => $dateLabel,
+                    'time' => $timeLabel
                 ];
             }
             $result->free();
@@ -135,20 +143,20 @@ function fetchToDateDailySales($mysqli, $startDate, $endDate)
     return $rows;
 }
 
-function formatRangeLabel($startDate, $endDate)
-{
-    $startLabel = date('F d, Y', strtotime($startDate));
-    $endLabel = date('F d, Y', strtotime($endDate));
-    return $startLabel === $endLabel ? $startLabel : $startLabel . ' - ' . $endLabel;
-}
-
-$reportLabel = formatRangeLabel($startDate, $endDate);
+$reportRangeLabel = 'from ' . date('F d', strtotime($startDate)) . ' to ' . date('d, Y', strtotime($endDate));
+$transactionCount = count($uniqueOrders);
+$dayCount = $startObject && $endObject ? $startObject->diff($endObject)->days + 1 : 1;
+$averageDailySales = $dayCount > 0 ? ($totalSales / $dayCount) : 0;
+$averageDailyTransactions = $dayCount > 0 ? ($transactionCount / $dayCount) : 0;
 $reportMeta = [
     'start_date' => $startDate,
     'end_date' => $endDate,
     'generated_at' => $generatedAt,
-    'records' => count($salesRows),
-    'grand_total' => $grandTotals['amount']
+    'records' => count($registerRows),
+    'total_sales' => $totalSales,
+    'transaction_count' => $transactionCount,
+    'average_daily_sales' => $averageDailySales,
+    'average_daily_transactions' => $averageDailyTransactions
 ];
 
 ob_start();
@@ -172,11 +180,25 @@ ob_start();
         font-size: 2rem;
         margin: 0;
     }
-    .subtotal-row {
-        background-color: #f8fafc;
+    .summary-table {
+        width: auto;
+        min-width: 280px;
     }
-    .grand-total-row {
-        background-color: #e2e8f0;
+    .summary-table td,
+    .summary-table th {
+        padding: 0.35rem 0.6rem;
+    }
+    .summary-table .value {
+        text-align: right;
+        min-width: 140px;
+    }
+    .daily-register-head-bottom {
+        background: #e5e7eb;
+        color: #dc2626;
+        font-size: 0.7rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        white-space: nowrap;
     }
     .todate-daily-sales-table .dataTables_wrapper,
     .todate-daily-sales-table .dataTables_scroll,
@@ -194,123 +216,110 @@ $styles = ob_get_clean();
 ob_start();
 ?>
 <div class="container-fluid py-4">
-    <div class="row mb-4 align-items-center">
+    <div class="row mb-4 align-items-start">
         <div class="col-lg-6">
-            <h3 class="mb-1">To-Date Daily Sales</h3>
-            <p class="text-muted mb-0">Sales by product from <?php echo htmlspecialchars($reportLabel); ?>.</p>
+            <h3 class="mb-1">Daily Sales Register</h3>
+            <p class="text-muted mb-1"><?php echo htmlspecialchars($reportRangeLabel); ?></p>
+            <p class="text-muted small mb-0">Generated: <?php echo htmlspecialchars($reportMeta['generated_at']); ?></p>
         </div>
         <div class="col-lg-6 mt-3 mt-lg-0">
-            <form class="row g-2 align-items-end justify-content-end" method="get" novalidate>
-                <div class="col-sm-6 col-md-5">
-                    <label for="start-date" class="form-label text-muted small mb-1">Start Date</label>
-                    <input type="date" id="start-date" name="start" class="form-control" value="<?php echo htmlspecialchars($reportMeta['start_date']); ?>">
+            <div class="d-flex flex-column gap-3 align-items-lg-end">
+                <form class="row g-2 align-items-end justify-content-lg-end" method="get" novalidate>
+                    <div class="col-sm-6 col-md-5">
+                        <label for="start-date" class="form-label text-muted small mb-1">Start Date</label>
+                        <input type="date" id="start-date" name="start" class="form-control" value="<?php echo htmlspecialchars($reportMeta['start_date']); ?>">
+                    </div>
+                    <div class="col-sm-6 col-md-5">
+                        <label for="end-date" class="form-label text-muted small mb-1">End Date</label>
+                        <input type="date" id="end-date" name="end" class="form-control" value="<?php echo htmlspecialchars($reportMeta['end_date']); ?>">
+                    </div>
+                    <div class="col-auto">
+                        <button type="submit" class="btn btn-primary">View</button>
+                    </div>
+                    <div class="col-auto">
+                        <a class="btn btn-outline-secondary" href="print_todate_daily_sales.php?start=<?php echo urlencode($reportMeta['start_date']); ?>&end=<?php echo urlencode($reportMeta['end_date']); ?>">
+                            Export Excel
+                        </a>
+                    </div>
+                </form>
+                <div class="table-responsive">
+                    <table class="table table-sm table-bordered summary-table mb-0">
+                        <tbody>
+                            <tr>
+                                <th class="text-uppercase small text-muted">Total Sales</th>
+                                <td class="value"><?php echo number_format($reportMeta['total_sales'], 2); ?></td>
+                            </tr>
+                            <tr>
+                                <th class="text-uppercase small text-muted">Total Transaction Count</th>
+                                <td class="value"><?php echo number_format($reportMeta['transaction_count']); ?></td>
+                            </tr>
+                            <tr>
+                                <th class="text-uppercase small text-muted">Average Daily Sales</th>
+                                <td class="value"><?php echo number_format($reportMeta['average_daily_sales'], 2); ?></td>
+                            </tr>
+                            <tr>
+                                <th class="text-uppercase small text-muted">Average Daily Transaction Count</th>
+                                <td class="value"><?php echo number_format($reportMeta['average_daily_transactions']); ?></td>
+                            </tr>
+                        </tbody>
+                    </table>
                 </div>
-                <div class="col-sm-6 col-md-5">
-                    <label for="end-date" class="form-label text-muted small mb-1">End Date</label>
-                    <input type="date" id="end-date" name="end" class="form-control" value="<?php echo htmlspecialchars($reportMeta['end_date']); ?>">
-                </div>
-                <div class="col-auto">
-                    <button type="submit" class="btn btn-primary">View</button>
-                </div>
-                <div class="col-auto">
-                    <a class="btn btn-outline-secondary" href="print_todate_daily_sales.php?start=<?php echo urlencode($reportMeta['start_date']); ?>&end=<?php echo urlencode($reportMeta['end_date']); ?>">
-                        Export Excel
-                    </a>
-                </div>
-                <div class="col-12 text-end">
-                    <span class="text-muted small">Generated: <?php echo htmlspecialchars($reportMeta['generated_at']); ?></span>
-                </div>
-            </form>
+            </div>
         </div>
     </div>
 
     <?php if ($pageError !== null): ?>
         <div class="alert alert-danger"><?php echo htmlspecialchars($pageError); ?></div>
     <?php else: ?>
-        <div class="row g-3 mb-4">
-            <div class="col-md-4">
-                <div class="report-card">
-                    <span class="label">Total Rows</span>
-                    <h4><?php echo number_format($reportMeta['records']); ?></h4>
-                    <p class="text-muted mb-0">Line items in the selected range.</p>
-                </div>
-            </div>
-            <div class="col-md-4">
-                <div class="report-card">
-                    <span class="label">Grand Total</span>
-                    <h4><?php echo number_format($reportMeta['grand_total'], 2); ?></h4>
-                    <p class="text-muted mb-0">Sum of all amounts in range.</p>
-                </div>
-            </div>
-        </div>
-
         <div class="card custom-card">
             <div class="card-header d-flex justify-content-between align-items-center">
-                <h5 class="card-title mb-0">Daily Sales by Product</h5>
-                <span class="text-muted small">
-                    <?php echo $reportMeta['records']; ?> record(s)
-                    <?php if ($reportMeta['grand_total'] > 0): ?>
-                        &bull; Total: <?php echo number_format($reportMeta['grand_total'], 2); ?>
-                    <?php endif; ?>
-                </span>
+                <h5 class="card-title mb-0">Daily Sales Register</h5>
+                <span class="text-muted small"><?php echo $reportMeta['records']; ?> record(s)</span>
             </div>
             <div class="card-body">
-                <?php if (empty($salesRows)): ?>
+                <?php if (empty($registerRows)): ?>
                     <p class="text-muted mb-0">No sales were recorded for the selected date range.</p>
                 <?php else: ?>
                     <div class="table-responsive todate-daily-sales-table">
                         <table id="todate-daily-sales-table" class="table table-striped align-middle mb-0 w-100">
                             <thead>
-                                <tr>
+                                <tr class="daily-register-head-bottom text-center align-middle">
+                                    <th>No.</th>
                                     <th>Date</th>
+                                    <th>Time</th>
+                                    <th>DR No.</th>
+                                    <th>Customer Code</th>
+                                    <th class="text-end">Quantity</th>
                                     <th>Product Code</th>
                                     <th>Product Description</th>
-                                    <th class="text-end">Total Transaction</th>
-                                    <th class="text-end">Line Item Discount</th>
-                                    <th class="text-end">Discount</th>
-                                    <th class="text-end">Qty</th>
                                     <th class="text-end">Unit Price</th>
                                     <th class="text-end">Amount</th>
+                                    <th class="text-end">Amount Received</th>
+                                    <th class="text-end">Change</th>
+                                    <th class="text-end">Cash</th>
+                                    <th class="text-end">On Account</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php foreach ($groupedSales as $saleDate => $items): ?>
-                                    <?php foreach ($items as $item): ?>
-                                        <tr>
-                                            <td><?php echo htmlspecialchars($saleDate); ?></td>
-                                            <td><?php echo htmlspecialchars($item['product_code']); ?></td>
-                                            <td><?php echo htmlspecialchars($item['product_description']); ?></td>
-                                            <td class="text-end"><?php echo number_format($item['total_transactions']); ?></td>
-                                            <td class="text-end"><?php echo number_format($item['lineitem_discount'], 2); ?></td>
-                                            <td class="text-end"><?php echo number_format($item['discount'], 2); ?></td>
-                                            <td class="text-end"><?php echo number_format($item['qty'], 2); ?></td>
-                                            <td class="text-end"><?php echo number_format($item['unit_price'], 2); ?></td>
-                                            <td class="text-end"><?php echo number_format($item['amount'], 2); ?></td>
-                                        </tr>
-                                    <?php endforeach; ?>
-                                    <tr class="subtotal-row fw-semibold">
-                                        <td><?php echo htmlspecialchars($saleDate); ?></td>
-                                        <td>Subtotal</td>
-                                        <td></td>
-                                        <td class="text-end"><?php echo number_format($dateTotals[$saleDate]['transactions']); ?></td>
-                                        <td class="text-end"><?php echo number_format($dateTotals[$saleDate]['lineitem_discount'], 2); ?></td>
-                                        <td class="text-end"><?php echo number_format($dateTotals[$saleDate]['discount'], 2); ?></td>
-                                        <td class="text-end"><?php echo number_format($dateTotals[$saleDate]['qty'], 2); ?></td>
-                                        <td class="text-end"></td>
-                                        <td class="text-end"><?php echo number_format($dateTotals[$saleDate]['amount'], 2); ?></td>
+                                <?php foreach ($registerRows as $index => $row): ?>
+                                    <?php $orderNoDisplay = $row['order_no'] !== '' ? 'DR' . $row['order_no'] : ''; ?>
+                                    <tr>
+                                        <td class="text-center"><?php echo $index + 1; ?></td>
+                                        <td><?php echo htmlspecialchars($row['date']); ?></td>
+                                        <td><?php echo htmlspecialchars($row['time']); ?></td>
+                                        <td><?php echo htmlspecialchars($orderNoDisplay); ?></td>
+                                        <td><?php echo htmlspecialchars($row['customer_code']); ?></td>
+                                        <td class="text-end"><?php echo number_format($row['qty'], 2); ?></td>
+                                        <td><?php echo htmlspecialchars($row['product_code']); ?></td>
+                                        <td><?php echo htmlspecialchars($row['product_description']); ?></td>
+                                        <td class="text-end"><?php echo number_format($row['unit_price'], 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($row['amount'], 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($row['amt_received'], 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($row['amt_change'], 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($row['cash'], 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($row['on_account'], 2); ?></td>
                                     </tr>
                                 <?php endforeach; ?>
-                                <tr class="grand-total-row fw-bold">
-                                    <td></td>
-                                    <td>Grand Total</td>
-                                    <td></td>
-                                    <td class="text-end"><?php echo number_format($grandTotals['transactions']); ?></td>
-                                    <td class="text-end"><?php echo number_format($grandTotals['lineitem_discount'], 2); ?></td>
-                                    <td class="text-end"><?php echo number_format($grandTotals['discount'], 2); ?></td>
-                                    <td class="text-end"><?php echo number_format($grandTotals['qty'], 2); ?></td>
-                                    <td class="text-end"></td>
-                                    <td class="text-end"><?php echo number_format($grandTotals['amount'], 2); ?></td>
-                                </tr>
                             </tbody>
                         </table>
                     </div>
@@ -338,15 +347,15 @@ $scriptsBuffer = function () use ($baseUrl) {
                 lengthChange: false,
                 ordering: false,
                 paging: true,
-                scrollX: false,
+                scrollX: true,
                 scrollY: '60vh',
                 scrollCollapse: true,
                 dom: "<'row align-items-center mb-2'<'col-sm-6'f><'col-sm-6 text-end'>>rt<'row align-items-center mt-2'<'col-sm-6'i><'col-sm-6'p>>",
                 language: {
                     search: 'Filter:',
                     emptyTable: 'No sales for this date range.',
-                    info: 'Showing _START_ to _END_ of _TOTAL_ sales',
-                    infoEmpty: 'Showing 0 to 0 of 0 sales',
+                    info: 'Showing _START_ to _END_ of _TOTAL_ records',
+                    infoEmpty: 'Showing 0 to 0 of 0 records',
                     paginate: { previous: 'Previous', next: 'Next' }
                 }
             });

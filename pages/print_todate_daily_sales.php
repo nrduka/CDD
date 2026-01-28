@@ -23,7 +23,6 @@ use PhpOffice\PhpSpreadsheet\Style\Border;
 use PhpOffice\PhpSpreadsheet\Style\Fill;
 use PhpOffice\PhpSpreadsheet\Style\Alignment;
 use PhpOffice\PhpSpreadsheet\Cell\DataType;
-use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
 
 $today = date('Y-m-d');
 $startInput = isset($_GET['start']) ? trim((string)$_GET['start']) : '';
@@ -60,42 +59,76 @@ if (!isset($mysqli) || !$mysqli) {
     exit;
 }
 
-function fetchToDateDailySales($mysqli, $startDate, $endDate)
+function resolveSalesDateTime($primaryValue, $fallbackValue)
+{
+    // Resolve to the first valid sales timestamp.
+    $primaryValue = trim((string)$primaryValue);
+    $fallbackValue = trim((string)$fallbackValue);
+    $dateTime = null;
+
+    if ($primaryValue !== '' && $primaryValue !== '0000-00-00 00:00:00') {
+        $dateTime = DateTime::createFromFormat('Y-m-d H:i:s', $primaryValue);
+    }
+    if (!$dateTime && $fallbackValue !== '' && $fallbackValue !== '0000-00-00 00:00:00') {
+        $dateTime = DateTime::createFromFormat('Y-m-d H:i:s', $fallbackValue);
+    }
+
+    return $dateTime ?: null;
+}
+
+function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
 {
     $rows = [];
-    $sql = "SELECT DATE(s.date_created) AS sale_date,
+    $sql = "SELECT s.order_no,
+                   s.customer_code,
+                   s.qty,
                    s.product_code,
-                   COALESCE(p.product_description, s.product_description) AS product_description,
-                   COALESCE(p.unit_price, s.unit_price) AS unit_price,
-                   COUNT(DISTINCT s.order_no) AS total_transactions,
-                   SUM(COALESCE(s.lineitem_discount, 0)) AS lineitem_discount_total,
-                   SUM(COALESCE(s.discount, 0)) AS discount_total,
-                   SUM(COALESCE(s.qty, 0)) AS qty_total,
-                   SUM(COALESCE(s.amount, 0)) AS amount_total
+                   s.product_description,
+                   s.unit_price,
+                   s.amount,
+                   s.date_created,
+                   s.date_time_ordered,
+                   s.amt_received,
+                   s.amt_change
             FROM sales s
-            LEFT JOIN ice_product p ON p.product_code = s.product_code
             WHERE DATE(s.date_created) BETWEEN ? AND ?
-            GROUP BY DATE(s.date_created),
-                     s.product_code,
-                     COALESCE(p.product_description, s.product_description),
-                     COALESCE(p.unit_price, s.unit_price)
-            ORDER BY DATE(s.date_created), s.product_code";
+            ORDER BY s.date_created, s.order_no, s.lineitem";
 
     $stmt = $mysqli->prepare($sql);
     if ($stmt) {
         $stmt->bind_param('ss', $startDate, $endDate);
         if ($stmt->execute() && ($result = $stmt->get_result())) {
             while ($row = $result->fetch_assoc()) {
+                $orderedAt = resolveSalesDateTime(
+                    isset($row['date_time_ordered']) ? $row['date_time_ordered'] : '',
+                    isset($row['date_created']) ? $row['date_created'] : ''
+                );
+                $dateLabel = $orderedAt ? $orderedAt->format('Y-m-d') : '';
+                $timeLabel = $orderedAt ? $orderedAt->format('H:i:s') : '';
+
+                $amount = isset($row['amount']) ? (float)$row['amount'] : 0.0;
+                $amtReceived = isset($row['amt_received']) ? (float)$row['amt_received'] : 0.0;
+                $amtChange = isset($row['amt_change']) ? (float)$row['amt_change'] : 0.0;
+                $cash = $amtReceived - $amtChange;
+                if ($cash < 0) {
+                    $cash = 0;
+                }
+                $onAccount = $amtReceived <= 0 ? $amount : 0;
+
                 $rows[] = [
-                    'sale_date' => isset($row['sale_date']) ? (string)$row['sale_date'] : '',
+                    'order_no' => isset($row['order_no']) ? (string)$row['order_no'] : '',
+                    'customer_code' => isset($row['customer_code']) ? (string)$row['customer_code'] : '',
+                    'qty' => isset($row['qty']) ? (float)$row['qty'] : 0.0,
                     'product_code' => isset($row['product_code']) ? (string)$row['product_code'] : '',
                     'product_description' => isset($row['product_description']) ? (string)$row['product_description'] : '',
-                    'total_transactions' => isset($row['total_transactions']) ? (int)$row['total_transactions'] : 0,
-                    'lineitem_discount' => isset($row['lineitem_discount_total']) ? (float)$row['lineitem_discount_total'] : 0,
-                    'discount' => isset($row['discount_total']) ? (float)$row['discount_total'] : 0,
-                    'qty' => isset($row['qty_total']) ? (float)$row['qty_total'] : 0,
-                    'unit_price' => isset($row['unit_price']) ? (float)$row['unit_price'] : 0,
-                    'amount' => isset($row['amount_total']) ? (float)$row['amount_total'] : 0
+                    'unit_price' => isset($row['unit_price']) ? (float)$row['unit_price'] : 0.0,
+                    'amount' => $amount,
+                    'amt_received' => $amtReceived,
+                    'amt_change' => $amtChange,
+                    'cash' => $cash,
+                    'on_account' => $onAccount,
+                    'date' => $dateLabel,
+                    'time' => $timeLabel
                 ];
             }
             $result->free();
@@ -106,51 +139,17 @@ function fetchToDateDailySales($mysqli, $startDate, $endDate)
     return $rows;
 }
 
-function fetchIceProducts($mysqli)
-{
-    $products = [];
-    $sql = "SELECT product_code, product_description, product_type
-            FROM ice_product
-            ORDER BY product_type, product_code";
-    $result = $mysqli->query($sql);
-    if ($result) {
-        while ($row = $result->fetch_assoc()) {
-            $productCode = isset($row['product_code']) ? (string)$row['product_code'] : '';
-            if ($productCode === '') {
-                continue;
-            }
-            $productType = trim((string)(isset($row['product_type']) ? $row['product_type'] : ''));
-            if ($productType === '') {
-                $productType = 'Unspecified';
-            }
-            if (!isset($products[$productType])) {
-                $products[$productType] = [];
-            }
-            $products[$productType][] = [
-                'code' => $productCode,
-                'description' => isset($row['product_description']) ? (string)$row['product_description'] : ''
-            ];
-        }
-        $result->free();
-    }
-
-    if (!empty($products)) {
-        ksort($products);
-        foreach ($products as $type => $list) {
-            usort($products[$type], function ($a, $b) {
-                return strcmp($a['code'], $b['code']);
-            });
-        }
-    }
-
-    return $products;
-}
-
-function fetchTotalTransactionsByDate($mysqli, $startDate, $endDate)
+function fetchToDateSummaryByDate($mysqli, $startDate, $endDate)
 {
     $totals = [];
     $sql = "SELECT DATE(s.date_created) AS sale_date,
-                   COUNT(DISTINCT s.order_no) AS total_transactions
+                   COUNT(DISTINCT s.order_no) AS total_transactions,
+                   SUM(COALESCE(s.qty, 0)) AS qty_total,
+                   SUM(COALESCE(s.amount, 0)) AS amount_total,
+                   SUM(COALESCE(s.amt_received, 0)) AS amt_received_total,
+                   SUM(COALESCE(s.amt_change, 0)) AS amt_change_total,
+                   SUM(CASE WHEN COALESCE(s.amt_received, 0) <= 0 THEN COALESCE(s.amount, 0) ELSE 0 END) AS on_account_total,
+                   SUM(CASE WHEN (COALESCE(s.amt_received, 0) - COALESCE(s.amt_change, 0)) < 0 THEN 0 ELSE (COALESCE(s.amt_received, 0) - COALESCE(s.amt_change, 0)) END) AS cash_total
             FROM sales s
             WHERE DATE(s.date_created) BETWEEN ? AND ?
             GROUP BY DATE(s.date_created)
@@ -164,7 +163,15 @@ function fetchTotalTransactionsByDate($mysqli, $startDate, $endDate)
                 if ($saleDate === '') {
                     continue;
                 }
-                $totals[$saleDate] = isset($row['total_transactions']) ? (int)$row['total_transactions'] : 0;
+                $totals[$saleDate] = [
+                    'transactions' => isset($row['total_transactions']) ? (int)$row['total_transactions'] : 0,
+                    'qty' => isset($row['qty_total']) ? (float)$row['qty_total'] : 0.0,
+                    'amount' => isset($row['amount_total']) ? (float)$row['amount_total'] : 0.0,
+                    'amt_received' => isset($row['amt_received_total']) ? (float)$row['amt_received_total'] : 0.0,
+                    'amt_change' => isset($row['amt_change_total']) ? (float)$row['amt_change_total'] : 0.0,
+                    'cash' => isset($row['cash_total']) ? (float)$row['cash_total'] : 0.0,
+                    'on_account' => isset($row['on_account_total']) ? (float)$row['on_account_total'] : 0.0
+                ];
             }
             $result->free();
         }
@@ -181,58 +188,66 @@ function formatRangeLabel($startDate, $endDate)
     return $startLabel === $endLabel ? $startLabel : $startLabel . ' - ' . $endLabel;
 }
 
-$salesRows = fetchToDateDailySales($mysqli, $startDate, $endDate);
-$groupedSales = [];
-$dateTotals = [];
-$grandTotals = [
-    'transactions' => 0,
-    'lineitem_discount' => 0,
-    'discount' => 0,
-    'qty' => 0,
-    'amount' => 0
-];
+function fillMissingSummaryDates($summaryByDate, $startDate, $endDate)
+{
+    $filled = [];
+    $start = new DateTime($startDate);
+    $end = new DateTime($endDate);
+    $end->modify('+1 day');
+    $period = new DatePeriod($start, new DateInterval('P1D'), $end);
 
-foreach ($salesRows as $row) {
-    $dateKey = $row['sale_date'];
-    if (!isset($groupedSales[$dateKey])) {
-        $groupedSales[$dateKey] = [];
-        $dateTotals[$dateKey] = [
+    foreach ($period as $date) {
+        $key = $date->format('Y-m-d');
+        if (isset($summaryByDate[$key])) {
+            $filled[$key] = $summaryByDate[$key];
+            continue;
+        }
+        $filled[$key] = [
             'transactions' => 0,
-            'lineitem_discount' => 0,
-            'discount' => 0,
-            'qty' => 0,
-            'amount' => 0
+            'qty' => 0.0,
+            'amount' => 0.0,
+            'amt_received' => 0.0,
+            'amt_change' => 0.0,
+            'cash' => 0.0,
+            'on_account' => 0.0
         ];
     }
-    $groupedSales[$dateKey][] = $row;
-    $dateTotals[$dateKey]['transactions'] += $row['total_transactions'];
-    $dateTotals[$dateKey]['lineitem_discount'] += $row['lineitem_discount'];
-    $dateTotals[$dateKey]['discount'] += $row['discount'];
-    $dateTotals[$dateKey]['qty'] += $row['qty'];
-    $dateTotals[$dateKey]['amount'] += $row['amount'];
 
-    $grandTotals['transactions'] += $row['total_transactions'];
-    $grandTotals['lineitem_discount'] += $row['lineitem_discount'];
-    $grandTotals['discount'] += $row['discount'];
-$grandTotals['qty'] += $row['qty'];
-    $grandTotals['amount'] += $row['amount'];
+    return $filled;
 }
-ksort($groupedSales);
-ksort($dateTotals);
+
+$registerRows = fetchToDateRegisterRows($mysqli, $startDate, $endDate);
+$totalSales = 0;
+$uniqueOrders = [];
+foreach ($registerRows as $row) {
+    $totalSales += isset($row['amount']) ? (float)$row['amount'] : 0;
+    $orderKey = isset($row['order_no']) ? (string)$row['order_no'] : '';
+    if ($orderKey !== '') {
+        $uniqueOrders[$orderKey] = true;
+    }
+}
+
+$transactionCount = count($uniqueOrders);
+$dayCount = $startObject && $endObject ? $startObject->diff($endObject)->days + 1 : 1;
+$averageDailySales = $dayCount > 0 ? ($totalSales / $dayCount) : 0;
+$averageDailyTransactions = $dayCount > 0 ? ($transactionCount / $dayCount) : 0;
+$summaryByDate = fetchToDateSummaryByDate($mysqli, $startDate, $endDate);
+$summaryByDate = fillMissingSummaryDates($summaryByDate, $startDate, $endDate);
 
 $rangeLabel = formatRangeLabel($startDate, $endDate);
+$reportRangeLabel = 'from ' . date('F d', strtotime($startDate)) . ' to ' . date('d, Y', strtotime($endDate));
 
 $spreadsheet = new Spreadsheet();
 $sheet = $spreadsheet->getActiveSheet();
-$sheet->setTitle('To-Date Daily Sales');
+$sheet->setTitle('Daily Sales Register');
 
-$sheet->setCellValue('A1', 'To-Date Daily Sales');
+$sheet->setCellValue('A1', 'DAILY SALES REGISTER');
 $sheet->getStyle('A1')->getFont()->setBold(true)->setSize(14);
-$sheet->setCellValue('A2', 'Date Range: ' . $rangeLabel);
+$sheet->setCellValue('A2', $reportRangeLabel);
 $sheet->setCellValue('A3', 'Generated: ' . $generatedAt);
 
 $headerStyle = [
-    'font' => ['bold' => true, 'color' => ['rgb' => '1f2937']],
+    'font' => ['bold' => true],
     'fill' => [
         'fillType' => Fill::FILL_SOLID,
         'startColor' => ['rgb' => 'e5e7eb']
@@ -243,88 +258,136 @@ $borderStyle = [
     'borders' => [
         'allBorders' => [
             'borderStyle' => Border::BORDER_THIN,
-            'color' => ['rgb' => 'cbd5e1']
+            'color' => ['rgb' => '000000']
+        ]
+    ]
+];
+$summaryBorderStyle = [
+    'borders' => [
+        'outline' => [
+            'borderStyle' => Border::BORDER_THIN,
+            'color' => ['rgb' => '000000']
         ]
     ]
 ];
 
 $currencyFormat = '#,##0.00';
-$numberFormat = '#,##0.00';
 
-$headerRow = 8;
-$dataRow = 9;
+$sheet->setCellValue('I1', 'TOTAL SALES');
+$sheet->setCellValue('K1', $totalSales);
+$sheet->setCellValue('I2', 'TOTAL TRANSACTION COUNT');
+$sheet->setCellValue('K2', $transactionCount);
+$sheet->setCellValue('I3', 'AVERAGE DAILY SALES');
+$sheet->setCellValue('K3', $averageDailySales);
+$sheet->setCellValue('I4', 'AVERAGE DAILY TRANSACTION COUNT');
+$sheet->setCellValue('K4', $averageDailyTransactions);
+$sheet->getStyle('I1:K1')->applyFromArray($summaryBorderStyle);
+$sheet->getStyle('I2:K2')->applyFromArray($summaryBorderStyle);
+$sheet->getStyle('I3:K3')->applyFromArray($summaryBorderStyle);
+$sheet->getStyle('I4:K4')->applyFromArray($summaryBorderStyle);
+$sheet->getStyle('I1:I4')->getFont()->setBold(true);
+$sheet->getStyle('K1')->getNumberFormat()->setFormatCode($currencyFormat);
+$sheet->getStyle('K2')->getNumberFormat()->setFormatCode('0');
+$sheet->getStyle('K3')->getNumberFormat()->setFormatCode($currencyFormat);
+$sheet->getStyle('K4')->getNumberFormat()->setFormatCode('0');
+$sheet->getStyle('K1:K4')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+
+$headerRow = 9;
+$dataRow = 10;
 
 $headers = [
-    'Date',
-    'Product Code',
-    'Product Description',
-    'Total Transaction',
-    'Line Item Discount',
-    'Discount',
-    'Qty',
-    'Unit Price',
-    'Amount'
+    'NO.',
+    'DATE',
+    'TIME',
+    'DR NO.',
+    'CUSTOMER CODE',
+    'QUANTITY',
+    'PRODUCT CODE',
+    'PRODUCT DESCRIPTION',
+    'UNIT PRICE',
+    'AMOUNT',
+    'AMOUNT RECEIVED',
+    'CHANGE',
+    'CASH',
+    'ON ACCOUNT'
 ];
 
 $sheet->fromArray($headers, null, 'A' . $headerRow);
-$sheet->getStyle("A{$headerRow}:I{$headerRow}")->applyFromArray($headerStyle);
-$sheet->getStyle("A{$headerRow}:I{$headerRow}")
+$sheet->getStyle("A{$headerRow}:N{$headerRow}")->applyFromArray($headerStyle);
+$sheet->getStyle("A{$headerRow}:N{$headerRow}")
     ->getAlignment()
     ->setWrapText(true)
     ->setHorizontal(Alignment::HORIZONTAL_CENTER)
     ->setVertical(Alignment::VERTICAL_CENTER);
+$sheet->getStyle("A{$headerRow}:N{$headerRow}")->getFont()->getColor()->setRGB('000000');
 
 $currentRow = $dataRow;
-foreach ($groupedSales as $saleDate => $items) {
-    foreach ($items as $item) {
-        $sheet->setCellValue("A{$currentRow}", $saleDate);
-        $sheet->setCellValueExplicit("B{$currentRow}", $item['product_code'], DataType::TYPE_STRING);
-        $sheet->setCellValue("C{$currentRow}", $item['product_description']);
-        $sheet->setCellValue("D{$currentRow}", $item['total_transactions']);
-        $sheet->setCellValue("E{$currentRow}", $item['lineitem_discount']);
-        $sheet->setCellValue("F{$currentRow}", $item['discount']);
-        $sheet->setCellValue("G{$currentRow}", $item['qty']);
-        $sheet->setCellValue("H{$currentRow}", $item['unit_price']);
-        $sheet->setCellValue("I{$currentRow}", $item['amount']);
-        $sheet->getStyle("E{$currentRow}:F{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-        $sheet->getStyle("G{$currentRow}")->getNumberFormat()->setFormatCode($numberFormat);
-        $sheet->getStyle("H{$currentRow}:I{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-        $currentRow++;
-    }
-
-    $sheet->setCellValue("B{$currentRow}", 'Subtotal');
-    $sheet->setCellValue("D{$currentRow}", $dateTotals[$saleDate]['transactions']);
-    $sheet->setCellValue("E{$currentRow}", $dateTotals[$saleDate]['lineitem_discount']);
-    $sheet->setCellValue("F{$currentRow}", $dateTotals[$saleDate]['discount']);
-    $sheet->setCellValue("G{$currentRow}", $dateTotals[$saleDate]['qty']);
-    $sheet->setCellValue("I{$currentRow}", $dateTotals[$saleDate]['amount']);
-    $sheet->getStyle("A{$currentRow}:I{$currentRow}")->applyFromArray($headerStyle);
-    $sheet->getStyle("A{$currentRow}:I{$currentRow}")->getFont()->setBold(true);
-    $sheet->getStyle("E{$currentRow}:F{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-    $sheet->getStyle("G{$currentRow}")->getNumberFormat()->setFormatCode($numberFormat);
-    $sheet->getStyle("I{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+$lineNumber = 1;
+foreach ($registerRows as $row) {
+    $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+    $orderNoDisplay = $orderNo !== '' ? 'DR' . $orderNo : '';
+    $sheet->setCellValue("A{$currentRow}", $lineNumber);
+    $sheet->setCellValueExplicit("B{$currentRow}", $row['date'], DataType::TYPE_STRING);
+    $sheet->setCellValueExplicit("C{$currentRow}", $row['time'], DataType::TYPE_STRING);
+    $sheet->setCellValueExplicit("D{$currentRow}", $orderNoDisplay, DataType::TYPE_STRING);
+    $sheet->setCellValueExplicit("E{$currentRow}", $row['customer_code'], DataType::TYPE_STRING);
+    $sheet->setCellValue("F{$currentRow}", $row['qty']);
+    $sheet->setCellValueExplicit("G{$currentRow}", $row['product_code'], DataType::TYPE_STRING);
+    $sheet->setCellValue("H{$currentRow}", $row['product_description']);
+    $sheet->setCellValue("I{$currentRow}", $row['unit_price']);
+    $sheet->setCellValue("J{$currentRow}", $row['amount']);
+    $sheet->setCellValue("K{$currentRow}", $row['amt_received']);
+    $sheet->setCellValue("L{$currentRow}", $row['amt_change']);
+    $sheet->setCellValue("M{$currentRow}", "=K{$currentRow}-L{$currentRow}");
+    $sheet->setCellValue("N{$currentRow}", "=IF(K{$currentRow}=0,J{$currentRow},0)");
     $currentRow++;
+    $lineNumber++;
 }
 
-$sheet->setCellValue("B{$currentRow}", 'Grand Total');
-$sheet->setCellValue("D{$currentRow}", $grandTotals['transactions']);
-$sheet->setCellValue("E{$currentRow}", $grandTotals['lineitem_discount']);
-$sheet->setCellValue("F{$currentRow}", $grandTotals['discount']);
-$sheet->setCellValue("G{$currentRow}", $grandTotals['qty']);
-$sheet->setCellValue("I{$currentRow}", $grandTotals['amount']);
-$sheet->getStyle("A{$currentRow}:I{$currentRow}")->applyFromArray($headerStyle);
-$sheet->getStyle("A{$currentRow}:I{$currentRow}")->getFont()->setBold(true);
-$sheet->getStyle("E{$currentRow}:F{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-$sheet->getStyle("G{$currentRow}")->getNumberFormat()->setFormatCode($numberFormat);
-$sheet->getStyle("I{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-
-if ($currentRow >= $headerRow) {
-    $sheet->getStyle("A{$headerRow}:I{$currentRow}")->applyFromArray($borderStyle);
+$lastDetailRow = $currentRow - 1;
+$totalRow = $currentRow;
+$sheet->setCellValue("H{$totalRow}", 'TOTAL');
+$sheet->getStyle("A{$totalRow}:N{$totalRow}")->getFont()->setBold(true);
+if ($lastDetailRow >= $dataRow) {
+    $sheet->setCellValue("J{$totalRow}", "=SUM(J{$dataRow}:J{$lastDetailRow})");
+    $sheet->setCellValue("K{$totalRow}", "=SUM(K{$dataRow}:K{$lastDetailRow})");
+    $sheet->setCellValue("L{$totalRow}", "=SUM(L{$dataRow}:L{$lastDetailRow})");
+    $sheet->setCellValue("M{$totalRow}", "=SUM(M{$dataRow}:M{$lastDetailRow})");
+    $sheet->setCellValue("N{$totalRow}", "=SUM(N{$dataRow}:N{$lastDetailRow})");
+} else {
+    $sheet->setCellValue("J{$totalRow}", 0);
+    $sheet->setCellValue("K{$totalRow}", 0);
+    $sheet->setCellValue("L{$totalRow}", 0);
+    $sheet->setCellValue("M{$totalRow}", 0);
+    $sheet->setCellValue("N{$totalRow}", 0);
 }
 
-foreach (range('A', 'I') as $column) {
+$lastDataRow = $totalRow;
+if ($lastDataRow >= $headerRow) {
+    $sheet->getStyle("A{$headerRow}:N{$lastDataRow}")->applyFromArray($borderStyle);
+}
+if ($lastDataRow >= $dataRow) {
+    $sheet->getStyle("F{$dataRow}:F{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+    $sheet->getStyle("I{$dataRow}:N{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+}
+$sheet->getStyle("B{$headerRow}:G{$lastDataRow}")
+    ->getAlignment()
+    ->setHorizontal(Alignment::HORIZONTAL_CENTER)
+    ->setVertical(Alignment::VERTICAL_CENTER);
+
+foreach (range('A', 'N') as $column) {
+    if (in_array($column, ['B', 'C', 'D', 'E', 'F', 'G'], true)) {
+        $sheet->getColumnDimension($column)->setAutoSize(false)->setWidth(15);
+        continue;
+    }
+    if (in_array($column, ['I', 'J', 'K', 'L', 'M', 'N'], true)) {
+        $sheet->getColumnDimension($column)->setAutoSize(false)->setWidth(20);
+        continue;
+    }
     $sheet->getColumnDimension($column)->setAutoSize(true);
 }
+$sheet->getColumnDimension('A')->setAutoSize(false)->setWidth(5);
+$sheet->getColumnDimension('H')->setAutoSize(false)->setWidth(40);
 
 $summarySheet = $spreadsheet->createSheet();
 $summarySheet->setTitle('Sales Summary');
@@ -337,18 +400,20 @@ $summarySheet->setCellValue('A3', 'Generated: ' . $generatedAt);
 $summaryHeaderRow = 8;
 $summaryDataRow = 9;
 $summaryHeaders = [
-    'No',
-    'Date',
-    'Total Transaction',
-    'Line Item Discount',
-    'Discount',
-    'Qty',
-    'Amount'
+    'NO.',
+    'DATE',
+    'TOTAL TRANSACTION',
+    'TOTAL QTY',
+    'TOTAL AMOUNT',
+    'AMOUNT RECEIVED',
+    'CHANGE',
+    'CASH',
+    'ON ACCOUNT'
 ];
 
 $summarySheet->fromArray($summaryHeaders, null, 'A' . $summaryHeaderRow);
-$summarySheet->getStyle("A{$summaryHeaderRow}:G{$summaryHeaderRow}")->applyFromArray($headerStyle);
-$summarySheet->getStyle("A{$summaryHeaderRow}:G{$summaryHeaderRow}")
+$summarySheet->getStyle("A{$summaryHeaderRow}:I{$summaryHeaderRow}")->applyFromArray($headerStyle);
+$summarySheet->getStyle("A{$summaryHeaderRow}:I{$summaryHeaderRow}")
     ->getAlignment()
     ->setWrapText(true)
     ->setHorizontal(Alignment::HORIZONTAL_CENTER)
@@ -356,251 +421,68 @@ $summarySheet->getStyle("A{$summaryHeaderRow}:G{$summaryHeaderRow}")
 
 $currentRow = $summaryDataRow;
 $counter = 1;
-foreach ($dateTotals as $saleDate => $totals) {
+$summaryTotals = [
+    'transactions' => 0,
+    'qty' => 0,
+    'amount' => 0,
+    'amt_received' => 0,
+    'amt_change' => 0,
+    'cash' => 0,
+    'on_account' => 0
+];
+foreach ($summaryByDate as $saleDate => $totals) {
     $summarySheet->setCellValue("A{$currentRow}", $counter);
     $summarySheet->setCellValue("B{$currentRow}", $saleDate);
     $summarySheet->setCellValue("C{$currentRow}", $totals['transactions']);
-    $summarySheet->setCellValue("D{$currentRow}", $totals['lineitem_discount']);
-    $summarySheet->setCellValue("E{$currentRow}", $totals['discount']);
-    $summarySheet->setCellValue("F{$currentRow}", $totals['qty']);
-    $summarySheet->setCellValue("G{$currentRow}", $totals['amount']);
-    $summarySheet->getStyle("D{$currentRow}:E{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-    $summarySheet->getStyle("F{$currentRow}")->getNumberFormat()->setFormatCode($numberFormat);
-    $summarySheet->getStyle("G{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+    $summarySheet->setCellValue("D{$currentRow}", $totals['qty']);
+    $summarySheet->setCellValue("E{$currentRow}", $totals['amount']);
+    $summarySheet->setCellValue("F{$currentRow}", $totals['amt_received']);
+    $summarySheet->setCellValue("G{$currentRow}", $totals['amt_change']);
+    $summarySheet->setCellValue("H{$currentRow}", $totals['cash']);
+    $summarySheet->setCellValue("I{$currentRow}", $totals['on_account']);
+    $summarySheet->getStyle("D{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+    $summarySheet->getStyle("E{$currentRow}:I{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+    $summaryTotals['transactions'] += $totals['transactions'];
+    $summaryTotals['qty'] += $totals['qty'];
+    $summaryTotals['amount'] += $totals['amount'];
+    $summaryTotals['amt_received'] += $totals['amt_received'];
+    $summaryTotals['amt_change'] += $totals['amt_change'];
+    $summaryTotals['cash'] += $totals['cash'];
+    $summaryTotals['on_account'] += $totals['on_account'];
     $currentRow++;
     $counter++;
 }
 
 $summarySheet->setCellValue("B{$currentRow}", 'Total');
-$summarySheet->setCellValue("C{$currentRow}", $grandTotals['transactions']);
-$summarySheet->setCellValue("D{$currentRow}", $grandTotals['lineitem_discount']);
-$summarySheet->setCellValue("E{$currentRow}", $grandTotals['discount']);
-$summarySheet->setCellValue("F{$currentRow}", $grandTotals['qty']);
-$summarySheet->setCellValue("G{$currentRow}", $grandTotals['amount']);
-$summarySheet->getStyle("A{$currentRow}:G{$currentRow}")->applyFromArray($headerStyle);
-$summarySheet->getStyle("A{$currentRow}:G{$currentRow}")->getFont()->setBold(true);
-$summarySheet->getStyle("D{$currentRow}:E{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-$summarySheet->getStyle("F{$currentRow}")->getNumberFormat()->setFormatCode($numberFormat);
-$summarySheet->getStyle("G{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+$summarySheet->setCellValue("C{$currentRow}", $summaryTotals['transactions']);
+$summarySheet->setCellValue("D{$currentRow}", $summaryTotals['qty']);
+$summarySheet->setCellValue("E{$currentRow}", $summaryTotals['amount']);
+$summarySheet->setCellValue("F{$currentRow}", $summaryTotals['amt_received']);
+$summarySheet->setCellValue("G{$currentRow}", $summaryTotals['amt_change']);
+$summarySheet->setCellValue("H{$currentRow}", $summaryTotals['cash']);
+$summarySheet->setCellValue("I{$currentRow}", $summaryTotals['on_account']);
+$summarySheet->getStyle("A{$currentRow}:I{$currentRow}")->applyFromArray($headerStyle);
+$summarySheet->getStyle("A{$currentRow}:I{$currentRow}")->getFont()->setBold(true);
+$summarySheet->getStyle("D{$currentRow}:I{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
 
 if ($currentRow >= $summaryHeaderRow) {
-    $summarySheet->getStyle("A{$summaryHeaderRow}:G{$currentRow}")->applyFromArray($borderStyle);
+    $summarySheet->getStyle("A{$summaryHeaderRow}:I{$currentRow}")->applyFromArray($borderStyle);
 }
 
-foreach (range('A', 'G') as $column) {
-    $summarySheet->getColumnDimension($column)->setAutoSize(true);
-}
-
-$productsByType = fetchIceProducts($mysqli);
-$salesByDateProduct = [];
-foreach ($salesRows as $row) {
-    $saleDate = $row['sale_date'];
-    $productCode = $row['product_code'];
-    if ($saleDate === '' || $productCode === '') {
+foreach (range('A', 'I') as $column) {
+    if ($column === 'A') {
+        $summarySheet->getColumnDimension($column)->setAutoSize(false)->setWidth(5);
         continue;
     }
-    if (!isset($salesByDateProduct[$saleDate])) {
-        $salesByDateProduct[$saleDate] = [];
+    if ($column === 'B') {
+        $summarySheet->getColumnDimension($column)->setAutoSize(false)->setWidth(15);
+        continue;
     }
-    if (!isset($salesByDateProduct[$saleDate][$productCode])) {
-        $salesByDateProduct[$saleDate][$productCode] = ['qty' => 0, 'amount' => 0];
+    if (in_array($column, ['E', 'F', 'G', 'H', 'I'], true)) {
+        $summarySheet->getColumnDimension($column)->setAutoSize(false)->setWidth(20);
+        continue;
     }
-    $salesByDateProduct[$saleDate][$productCode]['qty'] += $row['qty'];
-    $salesByDateProduct[$saleDate][$productCode]['amount'] += $row['amount'];
-}
-
-$totalTransactionsByDate = fetchTotalTransactionsByDate($mysqli, $startDate, $endDate);
-$dateKeys = array_unique(array_merge(array_keys($totalTransactionsByDate), array_keys($salesByDateProduct)));
-sort($dateKeys);
-
-$thirdSheet = $spreadsheet->createSheet();
-$thirdSheet->setTitle('Total Sales by Product');
-
-$thirdSheet->setCellValue('A1', 'Total Sales by Product');
-$thirdSheet->getStyle('A1')->getFont()->setBold(true)->setSize(14);
-$thirdSheet->setCellValue('A2', 'Date Range: ' . $rangeLabel);
-$thirdSheet->setCellValue('A3', 'Generated: ' . $generatedAt);
-
-$thirdHeaderTop = 7;
-$thirdHeaderCode = 8;
-$thirdHeaderDesc = 9;
-$thirdHeaderSub = 10;
-$thirdDataRow = 11;
-
-$thirdSheet->setCellValue("A{$thirdHeaderTop}", 'Date');
-$thirdSheet->mergeCells("A{$thirdHeaderTop}:A{$thirdHeaderSub}");
-$thirdSheet->setCellValue("B{$thirdHeaderTop}", 'Total Transaction');
-$thirdSheet->mergeCells("B{$thirdHeaderTop}:B{$thirdHeaderSub}");
-
-$colIndex = 3;
-$columnMeta = [
-    'products' => [],
-    'typeSubtotals' => [],
-    'totalAmount' => null
-];
-$qtyColumns = [];
-$amountColumns = [];
-
-foreach ($productsByType as $productType => $products) {
-    $groupStartCol = $colIndex;
-    foreach ($products as $product) {
-        $startCol = $colIndex;
-        $endCol = $colIndex + 1;
-        $startLetter = Coordinate::stringFromColumnIndex($startCol);
-        $endLetter = Coordinate::stringFromColumnIndex($endCol);
-        $label = $product['code'];
-        $thirdSheet->setCellValue($startLetter . $thirdHeaderCode, $label);
-        $thirdSheet->mergeCells($startLetter . $thirdHeaderCode . ':' . $endLetter . $thirdHeaderCode);
-        $thirdSheet->setCellValue($startLetter . $thirdHeaderDesc, $product['description']);
-        $thirdSheet->mergeCells($startLetter . $thirdHeaderDesc . ':' . $endLetter . $thirdHeaderDesc);
-        $thirdSheet->setCellValue($startLetter . $thirdHeaderSub, 'Qty');
-        $thirdSheet->setCellValue($endLetter . $thirdHeaderSub, 'Amount');
-        $columnMeta['products'][$product['code']] = [
-            'qty' => $startCol,
-            'amount' => $endCol,
-            'type' => $productType
-        ];
-        $qtyColumns[] = $startCol;
-        $amountColumns[] = $endCol;
-        $colIndex += 2;
-    }
-
-    $subtotalStart = $colIndex;
-    $subtotalEnd = $colIndex + 1;
-    $subtotalStartLetter = Coordinate::stringFromColumnIndex($subtotalStart);
-    $subtotalEndLetter = Coordinate::stringFromColumnIndex($subtotalEnd);
-    $thirdSheet->setCellValue($subtotalStartLetter . $thirdHeaderCode, 'Subtotal');
-    $thirdSheet->mergeCells($subtotalStartLetter . $thirdHeaderCode . ':' . $subtotalEndLetter . $thirdHeaderCode);
-    $thirdSheet->mergeCells($subtotalStartLetter . $thirdHeaderDesc . ':' . $subtotalEndLetter . $thirdHeaderDesc);
-    $thirdSheet->setCellValue($subtotalStartLetter . $thirdHeaderSub, 'Qty');
-    $thirdSheet->setCellValue($subtotalEndLetter . $thirdHeaderSub, 'Amount');
-    $columnMeta['typeSubtotals'][$productType] = [
-        'qty' => $subtotalStart,
-        'amount' => $subtotalEnd
-    ];
-    $qtyColumns[] = $subtotalStart;
-    $amountColumns[] = $subtotalEnd;
-    $colIndex += 2;
-
-    $groupStartLetter = Coordinate::stringFromColumnIndex($groupStartCol);
-    $groupEndLetter = Coordinate::stringFromColumnIndex($subtotalEnd);
-    $thirdSheet->setCellValue($groupStartLetter . $thirdHeaderTop, $productType);
-    $thirdSheet->mergeCells($groupStartLetter . $thirdHeaderTop . ':' . $groupEndLetter . $thirdHeaderTop);
-}
-
-$totalAmountCol = $colIndex;
-$totalAmountLetter = Coordinate::stringFromColumnIndex($totalAmountCol);
-$thirdSheet->setCellValue($totalAmountLetter . $thirdHeaderTop, 'Total Amount');
-$thirdSheet->mergeCells($totalAmountLetter . $thirdHeaderTop . ':' . $totalAmountLetter . $thirdHeaderSub);
-$columnMeta['totalAmount'] = $totalAmountCol;
-$amountColumns[] = $totalAmountCol;
-
-$lastHeaderLetter = Coordinate::stringFromColumnIndex($totalAmountCol);
-$thirdSheet->getStyle("A{$thirdHeaderTop}:{$lastHeaderLetter}{$thirdHeaderSub}")->applyFromArray($headerStyle);
-$thirdSheet->getStyle("A{$thirdHeaderTop}:{$lastHeaderLetter}{$thirdHeaderSub}")
-    ->getAlignment()
-    ->setWrapText(true)
-    ->setHorizontal(Alignment::HORIZONTAL_CENTER)
-    ->setVertical(Alignment::VERTICAL_CENTER);
-
-$grandTotalsByProduct = [];
-$grandTotalsByType = [];
-$grandTotalAmount = 0;
-$grandTotalTransactions = 0;
-
-$currentRow = $thirdDataRow;
-foreach ($dateKeys as $saleDate) {
-    $thirdSheet->setCellValue("A{$currentRow}", $saleDate);
-    $totalTransactions = isset($totalTransactionsByDate[$saleDate]) ? $totalTransactionsByDate[$saleDate] : 0;
-    $thirdSheet->setCellValue("B{$currentRow}", $totalTransactions);
-    $grandTotalTransactions += $totalTransactions;
-
-    $totalAmountForDate = 0;
-    foreach ($productsByType as $productType => $products) {
-        $typeQty = 0;
-        $typeAmount = 0;
-        foreach ($products as $product) {
-            $code = $product['code'];
-            $qty = 0;
-            $amount = 0;
-            if (isset($salesByDateProduct[$saleDate][$code])) {
-                $qty = $salesByDateProduct[$saleDate][$code]['qty'];
-                $amount = $salesByDateProduct[$saleDate][$code]['amount'];
-            }
-            $qtyCol = $columnMeta['products'][$code]['qty'];
-            $amountCol = $columnMeta['products'][$code]['amount'];
-            $thirdSheet->setCellValue(Coordinate::stringFromColumnIndex($qtyCol) . $currentRow, $qty);
-            $thirdSheet->setCellValue(Coordinate::stringFromColumnIndex($amountCol) . $currentRow, $amount);
-
-            if (!isset($grandTotalsByProduct[$code])) {
-                $grandTotalsByProduct[$code] = ['qty' => 0, 'amount' => 0];
-            }
-            $grandTotalsByProduct[$code]['qty'] += $qty;
-            $grandTotalsByProduct[$code]['amount'] += $amount;
-
-            $typeQty += $qty;
-            $typeAmount += $amount;
-            $totalAmountForDate += $amount;
-        }
-
-        $subtotalCols = $columnMeta['typeSubtotals'][$productType];
-        $thirdSheet->setCellValue(Coordinate::stringFromColumnIndex($subtotalCols['qty']) . $currentRow, $typeQty);
-        $thirdSheet->setCellValue(Coordinate::stringFromColumnIndex($subtotalCols['amount']) . $currentRow, $typeAmount);
-
-        if (!isset($grandTotalsByType[$productType])) {
-            $grandTotalsByType[$productType] = ['qty' => 0, 'amount' => 0];
-        }
-        $grandTotalsByType[$productType]['qty'] += $typeQty;
-        $grandTotalsByType[$productType]['amount'] += $typeAmount;
-    }
-
-    $thirdSheet->setCellValue($totalAmountLetter . $currentRow, $totalAmountForDate);
-    $grandTotalAmount += $totalAmountForDate;
-
-    $currentRow++;
-}
-
-$thirdSheet->setCellValue("A{$currentRow}", 'Total');
-$thirdSheet->setCellValue("B{$currentRow}", $grandTotalTransactions);
-foreach ($productsByType as $productType => $products) {
-    foreach ($products as $product) {
-        $code = $product['code'];
-        $totals = isset($grandTotalsByProduct[$code]) ? $grandTotalsByProduct[$code] : ['qty' => 0, 'amount' => 0];
-        $qtyCol = $columnMeta['products'][$code]['qty'];
-        $amountCol = $columnMeta['products'][$code]['amount'];
-        $thirdSheet->setCellValue(Coordinate::stringFromColumnIndex($qtyCol) . $currentRow, $totals['qty']);
-        $thirdSheet->setCellValue(Coordinate::stringFromColumnIndex($amountCol) . $currentRow, $totals['amount']);
-    }
-    $typeTotals = isset($grandTotalsByType[$productType]) ? $grandTotalsByType[$productType] : ['qty' => 0, 'amount' => 0];
-    $subtotalCols = $columnMeta['typeSubtotals'][$productType];
-    $thirdSheet->setCellValue(Coordinate::stringFromColumnIndex($subtotalCols['qty']) . $currentRow, $typeTotals['qty']);
-    $thirdSheet->setCellValue(Coordinate::stringFromColumnIndex($subtotalCols['amount']) . $currentRow, $typeTotals['amount']);
-}
-$thirdSheet->setCellValue($totalAmountLetter . $currentRow, $grandTotalAmount);
-$thirdSheet->getStyle("A{$currentRow}:{$lastHeaderLetter}{$currentRow}")->applyFromArray($headerStyle);
-$thirdSheet->getStyle("A{$currentRow}:{$lastHeaderLetter}{$currentRow}")->getFont()->setBold(true);
-
-if ($currentRow >= $thirdHeaderTop) {
-    $thirdSheet->getStyle("A{$thirdHeaderTop}:{$lastHeaderLetter}{$currentRow}")->applyFromArray($borderStyle);
-}
-
-foreach ($qtyColumns as $qtyCol) {
-    $colLetter = Coordinate::stringFromColumnIndex($qtyCol);
-    $thirdSheet->getStyle("{$colLetter}{$thirdDataRow}:{$colLetter}{$currentRow}")
-        ->getNumberFormat()
-        ->setFormatCode($numberFormat);
-}
-foreach ($amountColumns as $amountCol) {
-    $colLetter = Coordinate::stringFromColumnIndex($amountCol);
-    $thirdSheet->getStyle("{$colLetter}{$thirdDataRow}:{$colLetter}{$currentRow}")
-        ->getNumberFormat()
-        ->setFormatCode($currencyFormat);
-}
-
-$thirdSheet->getColumnDimension('A')->setAutoSize(true);
-$thirdSheet->getColumnDimension('B')->setAutoSize(true);
-for ($i = 3; $i <= $totalAmountCol; $i++) {
-    $thirdSheet->getColumnDimension(Coordinate::stringFromColumnIndex($i))->setAutoSize(true);
+    $summarySheet->getColumnDimension($column)->setAutoSize(true);
 }
 
 $spreadsheet->setActiveSheetIndex(0);

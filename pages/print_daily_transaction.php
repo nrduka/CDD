@@ -108,6 +108,33 @@ function fetchDailyRegisterRows($mysqli, $reportDate)
     return $rows;
 }
 
+function fetchMonthlySummary($mysqli, $startDate, $endDate)
+{
+    $summary = [
+        'total_sales' => 0,
+        'transaction_count' => 0
+    ];
+    $sql = "SELECT SUM(s.amount) AS total_sales,
+                   COUNT(DISTINCT CASE WHEN s.order_no <> '' THEN s.order_no END) AS transaction_count
+            FROM sales s
+            WHERE DATE(s.date_created) BETWEEN ? AND ?";
+    $stmt = $mysqli->prepare($sql);
+    if ($stmt) {
+        $stmt->bind_param('ss', $startDate, $endDate);
+        if ($stmt->execute() && ($result = $stmt->get_result())) {
+            $row = $result->fetch_assoc();
+            if ($row) {
+                $summary['total_sales'] = isset($row['total_sales']) ? (float)$row['total_sales'] : 0;
+                $summary['transaction_count'] = isset($row['transaction_count']) ? (int)$row['transaction_count'] : 0;
+            }
+            $result->free();
+        }
+        $stmt->close();
+    }
+
+    return $summary;
+}
+
 $registerRows = fetchDailyRegisterRows($mysqli, $reportDate);
 $totalSales = 0;
 $uniqueOrders = [];
@@ -120,9 +147,11 @@ foreach ($registerRows as $row) {
 }
 
 $transactionCount = count($uniqueOrders);
-$dayCount = 1;
-$averageDailySales = $dayCount > 0 ? $totalSales / $dayCount : 0;
-$averageDailyTransactions = $dayCount > 0 ? $transactionCount / $dayCount : 0;
+$startOfMonth = (new DateTime($reportDate))->modify('first day of this month')->format('Y-m-d');
+$dayCount = (new DateTime($startOfMonth))->diff(new DateTime($reportDate))->days + 1;
+$monthSummary = fetchMonthlySummary($mysqli, $startOfMonth, $reportDate);
+$averageDailySales = $dayCount > 0 ? ($monthSummary['total_sales'] / $dayCount) : 0;
+$averageDailyTransactions = $dayCount > 0 ? ($monthSummary['transaction_count'] / $dayCount) : 0;
 $reportRangeLabel = 'from ' . date('F d', strtotime($reportDate)) . ' to ' . date('d, Y', strtotime($reportDate));
 
 $spreadsheet = new Spreadsheet();
