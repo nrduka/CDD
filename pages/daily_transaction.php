@@ -251,16 +251,33 @@ if (!isset($mysqli) || !$mysqli) {
 } else {
     $sql = "SELECT s.order_no,
                    s.customer_code,
+                   s.delivery_instruction,
+                   s.lineitem,
                    s.qty,
                    s.product_code,
                    s.product_description,
+                   s.lineitem_discount,
+                   s.discount,
                    s.unit_price,
                    s.amount,
+                   s.date_delivery,
+                   s.time_delivery,
                    s.date_created,
                    s.date_time_ordered,
                    s.amt_received,
-                   s.amt_change
+                   s.amt_change,
+                   s.void_status,
+                   s.void_remarks,
+                   s.void_authorized_by,
+                   c.storeName,
+                   c.address,
+                   c.firstName,
+                   c.middleName,
+                   c.lastName,
+                   p.uom
             FROM sales s
+            LEFT JOIN customer_register c ON c.customer_code = s.customer_code
+            LEFT JOIN ice_product p ON p.product_code = s.product_code
             WHERE DATE(s.date_created) = ?
             ORDER BY s.date_created, s.order_no, s.lineitem";
     $stmt = $mysqli->prepare($sql);
@@ -307,6 +324,60 @@ if (!isset($mysqli) || !$mysqli) {
                     'cash' => $cash,
                     'on_account' => $onAccount
                 ];
+
+                if (!isset($orders[$orderNo])) {
+                    $orders[$orderNo] = [
+                        'order_no' => $orderNo,
+                        'customer_code' => trim((string)(isset($row['customer_code']) ? $row['customer_code'] : '')),
+                        'customer_name' => buildCustomerDisplayName($row),
+                        'customer_address' => trim((string)(isset($row['address']) ? $row['address'] : '')),
+                        'delivery_instruction' => trim((string)(isset($row['delivery_instruction']) ? $row['delivery_instruction'] : '')),
+                        'date_delivery' => (string)(isset($row['date_delivery']) ? $row['date_delivery'] : ''),
+                        'time_delivery' => (string)(isset($row['time_delivery']) ? $row['time_delivery'] : ''),
+                        'date_created' => (string)(isset($row['date_created']) ? $row['date_created'] : ''),
+                        'discount' => isset($row['discount']) ? (float)$row['discount'] : 0.0,
+                        'amt_received' => $amtReceived,
+                        'amt_change' => $amtChange,
+                        'void_status' => isset($row['void_status']) ? (int)$row['void_status'] : 0,
+                        'void_remarks' => trim((string)(isset($row['void_remarks']) ? $row['void_remarks'] : '')),
+                        'void_authorized_by' => trim((string)(isset($row['void_authorized_by']) ? $row['void_authorized_by'] : '')),
+                        'items' => [],
+                        'total_qty' => 0,
+                        'total_amount' => 0
+                    ];
+                }
+
+                $qty = isset($row['qty']) ? (float)$row['qty'] : 0.0;
+                $unitPrice = isset($row['unit_price']) ? (float)$row['unit_price'] : 0.0;
+                $lineDiscount = isset($row['lineitem_discount']) ? (float)$row['lineitem_discount'] : 0.0;
+                $gross = $qty * $unitPrice;
+                $unitDiscount = $qty > 0 ? $lineDiscount / $qty : 0.0;
+
+                $orders[$orderNo]['items'][] = [
+                    'code' => (string)(isset($row['product_code']) ? $row['product_code'] : ''),
+                    'description' => (string)(isset($row['product_description']) ? $row['product_description'] : ''),
+                    'uom' => (string)(isset($row['uom']) ? $row['uom'] : ''),
+                    'qty' => $qty,
+                    'unit_price' => $unitPrice,
+                    'unit_discount' => $unitDiscount,
+                    'line_discount' => $lineDiscount,
+                    'gross_amount' => $gross,
+                    'amount' => $amount
+                ];
+
+                $orders[$orderNo]['total_qty'] += $qty;
+                $orders[$orderNo]['total_amount'] += $amount;
+                if (isset($row['void_status']) && (int)$row['void_status'] === 1) {
+                    $orders[$orderNo]['void_status'] = 1;
+                }
+                $voidRemarks = trim((string)(isset($row['void_remarks']) ? $row['void_remarks'] : ''));
+                if ($orders[$orderNo]['void_remarks'] === '' && $voidRemarks !== '') {
+                    $orders[$orderNo]['void_remarks'] = $voidRemarks;
+                }
+                $voidAuthorizedBy = trim((string)(isset($row['void_authorized_by']) ? $row['void_authorized_by'] : ''));
+                if ($orders[$orderNo]['void_authorized_by'] === '' && $voidAuthorizedBy !== '') {
+                    $orders[$orderNo]['void_authorized_by'] = $voidAuthorizedBy;
+                }
 
                 $totalSales += $amount;
             }
@@ -427,6 +498,12 @@ ob_start();
     .daily-transaction-table .dataTables_scrollBody table {
         width: 100% !important;
     }
+    .daily-transaction-table .dataTables_scrollBody {
+        overflow-x: scroll !important;
+    }
+    .daily-transaction-table table {
+        min-width: 1600px;
+    }
     @media print {
         @page {
             size: 80mm auto;
@@ -527,7 +604,7 @@ ob_start();
                 <?php if (empty($registerRows)): ?>
                     <p class="text-muted mb-0">No transactions were recorded for the selected date.</p>
                 <?php else: ?>
-                    <div class="table-responsive daily-transaction-table">
+                    <div class="table-responsive daily-transaction-table" style="overflow-x:auto;">
                         <table id="daily-transaction-table" class="table table-striped align-middle mb-0 w-100">
                             <thead>
                                 <tr class="daily-register-head-bottom text-center align-middle">
@@ -545,16 +622,25 @@ ob_start();
                                     <th class="text-end">Change</th>
                                     <th class="text-end">Cash</th>
                                     <th class="text-end">On Account</th>
+                                    <th class="text-center">Action</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 <?php foreach ($registerRows as $index => $row): ?>
                                     <?php $orderNoDisplay = $row['order_no'] !== '' ? 'DR' . $row['order_no'] : ''; ?>
+                                    <?php $orderVoid = !empty($orders[$row['order_no']]['void_status']); ?>
                                     <tr>
                                         <td class="text-center"><?php echo $index + 1; ?></td>
                                         <td><?php echo htmlspecialchars($row['date']); ?></td>
                                         <td><?php echo htmlspecialchars($row['time']); ?></td>
-                                        <td><?php echo htmlspecialchars($orderNoDisplay); ?></td>
+                                        <td>
+                                            <div class="fw-semibold">
+                                                <?php echo htmlspecialchars($orderNoDisplay); ?>
+                                                <?php if ($orderVoid): ?>
+                                                    <span class="badge bg-danger ms-2">Voided</span>
+                                                <?php endif; ?>
+                                            </div>
+                                        </td>
                                         <td><?php echo htmlspecialchars($row['customer_code']); ?></td>
                                         <td class="text-end"><?php echo number_format($row['qty'], 2); ?></td>
                                         <td><?php echo htmlspecialchars($row['product_code']); ?></td>
@@ -565,6 +651,16 @@ ob_start();
                                         <td class="text-end"><?php echo number_format($row['amt_change'], 2); ?></td>
                                         <td class="text-end"><?php echo number_format($row['cash'], 2); ?></td>
                                         <td class="text-end"><?php echo number_format($row['on_account'], 2); ?></td>
+                                        <td class="text-center">
+                                            <div class="d-inline-flex flex-wrap gap-2 justify-content-center">
+                                                <button type="button" class="btn btn-sm btn-outline-primary pos-print-order" data-order-no="<?php echo htmlspecialchars($row['order_no']); ?>">
+                                                    Print
+                                                </button>
+                                                <button type="button" class="btn btn-sm btn-outline-danger pos-void-order" data-order-no="<?php echo htmlspecialchars($row['order_no']); ?>" <?php echo $orderVoid ? 'disabled aria-disabled="true"' : ''; ?>>
+                                                    Void
+                                                </button>
+                                            </div>
+                                        </td>
                                     </tr>
                                 <?php endforeach; ?>
                             </tbody>
@@ -574,6 +670,40 @@ ob_start();
             </div>
         </div>
     <?php endif; ?>
+</div>
+
+<div id="daily-transaction-print-area" class="pos-print-area" aria-hidden="true"></div>
+
+<div class="modal fade" id="void-order-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Void Order</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted small mb-3">Order: <span id="void-order-label" class="fw-semibold"></span></p>
+                <div class="mb-3">
+                    <label class="form-label fw-semibold" for="void-reason">Reason for voiding</label>
+                    <textarea class="form-control" id="void-reason" rows="3" maxlength="100" placeholder="Enter reason for voiding"></textarea>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label fw-semibold" for="void-admin-username">Admin Username</label>
+                    <input type="text" class="form-control" id="void-admin-username" name="void_admin_user" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true" data-form-type="other" placeholder="Admin username">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label fw-semibold" for="void-admin-password">Admin Password</label>
+                    <input type="password" class="form-control" id="void-admin-password" name="void_admin_pass" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" data-form-type="other" placeholder="Admin password">
+                </div>
+                <div class="alert alert-danger d-none" id="void-order-error"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-outline-danger" id="void-order-cancel-only">Cancel Order</button>
+                <button type="button" class="btn btn-danger" id="void-order-confirm">Void and Reorder</button>
+            </div>
+        </div>
+    </div>
 </div>
 <?php
 $content = ob_get_clean();
