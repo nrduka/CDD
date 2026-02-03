@@ -95,8 +95,8 @@ function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
                    s.amt_received,
                    s.amt_change
             FROM sales s
-            WHERE DATE(s.date_created) BETWEEN ? AND ?
-            ORDER BY s.date_created, s.order_no, s.lineitem";
+            WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) BETWEEN ? AND ?
+            ORDER BY COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created), s.order_no, s.lineitem";
 
     $stmt = $mysqli->prepare($sql);
     if ($stmt) {

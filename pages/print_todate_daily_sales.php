@@ -91,8 +91,8 @@ function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
                    s.amt_received,
                    s.amt_change
             FROM sales s
-            WHERE DATE(s.date_created) BETWEEN ? AND ?
-            ORDER BY s.date_created, s.order_no, s.lineitem";
+            WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) BETWEEN ? AND ?
+            ORDER BY COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created), s.order_no, s.lineitem";
 
     $stmt = $mysqli->prepare($sql);
     if ($stmt) {
@@ -142,7 +142,7 @@ function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
 function fetchToDateSummaryByDate($mysqli, $startDate, $endDate)
 {
     $totals = [];
-    $sql = "SELECT DATE(s.date_created) AS sale_date,
+    $sql = "SELECT DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) AS sale_date,
                    COUNT(DISTINCT s.order_no) AS total_transactions,
                    SUM(COALESCE(s.qty, 0)) AS qty_total,
                    SUM(COALESCE(s.amount, 0)) AS amount_total,
@@ -151,9 +151,9 @@ function fetchToDateSummaryByDate($mysqli, $startDate, $endDate)
                    SUM(CASE WHEN COALESCE(s.amt_received, 0) <= 0 THEN COALESCE(s.amount, 0) ELSE 0 END) AS on_account_total,
                    SUM(CASE WHEN (COALESCE(s.amt_received, 0) - COALESCE(s.amt_change, 0)) < 0 THEN 0 ELSE (COALESCE(s.amt_received, 0) - COALESCE(s.amt_change, 0)) END) AS cash_total
             FROM sales s
-            WHERE DATE(s.date_created) BETWEEN ? AND ?
-            GROUP BY DATE(s.date_created)
-            ORDER BY DATE(s.date_created)";
+            WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) BETWEEN ? AND ?
+            GROUP BY DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created))
+            ORDER BY DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created))";
     $stmt = $mysqli->prepare($sql);
     if ($stmt) {
         $stmt->bind_param('ss', $startDate, $endDate);

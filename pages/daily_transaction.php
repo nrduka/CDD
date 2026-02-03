@@ -228,7 +228,7 @@ function fetch_monthly_summary($mysqli, $startDate, $endDate)
     $sql = "SELECT SUM(s.amount) AS total_sales,
                    COUNT(DISTINCT CASE WHEN s.order_no <> '' THEN s.order_no END) AS transaction_count
             FROM sales s
-            WHERE DATE(s.date_created) BETWEEN ? AND ?";
+            WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) BETWEEN ? AND ?";
     $stmt = $mysqli->prepare($sql);
     if ($stmt) {
         $stmt->bind_param('ss', $startDate, $endDate);
@@ -278,8 +278,8 @@ if (!isset($mysqli) || !$mysqli) {
             FROM sales s
             LEFT JOIN customer_register c ON c.customer_code = s.customer_code
             LEFT JOIN ice_product p ON p.product_code = s.product_code
-            WHERE DATE(s.date_created) = ?
-            ORDER BY s.date_created, s.order_no, s.lineitem";
+            WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) = ?
+            ORDER BY COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created), s.order_no, s.lineitem";
     $stmt = $mysqli->prepare($sql);
     if (!$stmt) {
         $pageError = 'Unable to load transactions.';
@@ -388,12 +388,9 @@ if (!isset($mysqli) || !$mysqli) {
 }
 
 $transactionCount = count($uniqueOrders);
-$startOfMonth = (new DateTime($reportDate))->modify('first day of this month')->format('Y-m-d');
-$dayCount = (new DateTime($startOfMonth))->diff(new DateTime($reportDate))->days + 1;
-// Month-to-date averages up to the selected report date.
-$monthSummary = fetch_monthly_summary($mysqli, $startOfMonth, $reportDate);
-$averageDailySales = $dayCount > 0 ? ($monthSummary['total_sales'] / $dayCount) : 0;
-$averageDailyTransactions = $dayCount > 0 ? ($monthSummary['transaction_count'] / $dayCount) : 0;
+$dayCount = 1;
+$averageDailySales = $dayCount > 0 ? ($totalSales / $dayCount) : 0;
+$averageDailyTransactions = $dayCount > 0 ? ($transactionCount / $dayCount) : 0;
 
 $reportDateLabel = date('F d, Y', strtotime($reportDate));
 $reportRangeLabel = 'from ' . date('F d', strtotime($reportDate)) . ' to ' . date('d, Y', strtotime($reportDate));
