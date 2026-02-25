@@ -137,6 +137,20 @@
                                     <li class="slide">
                                         <a href="todate_daily_sales.php" class="side-menu__item">To-Date Daily Sales</a>
                                     </li>
+                                    <li class="slide has-sub">
+                                        <a href="javascript:void(0);" class="side-menu__item">
+                                            <span class="side-menu__label">Production</span>
+                                            <i class="fe fe-chevron-right side-menu__angle"></i>
+                                        </a>
+                                        <ul class="slide-menu child2">
+                                            <li class="slide">
+                                                <a href="daily_production.php" class="side-menu__item">Daily Production</a>
+                                            </li>
+                                            <li class="slide">
+                                                <a href="todate_production.php" class="side-menu__item">To-Date Production</a>
+                                            </li>
+                                        </ul>
+                                    </li>
                                 </ul>
                             </li>
                             <!-- End::slide -->

@@ -20,6 +20,8 @@ require_once __DIR__ . '/db2.php';
 $today = date('Y-m-d');
 $startInput = isset($_GET['start']) ? trim((string)$_GET['start']) : '';
 $endInput = isset($_GET['end']) ? trim((string)$_GET['end']) : '';
+$reportTypeInput = isset($_GET['report_type']) ? trim((string)$_GET['report_type']) : '';
+$reportType = in_array($reportTypeInput, ['detailed', 'by_product'], true) ? $reportTypeInput : 'detailed';
 
 $startDate = $startInput !== '' ? $startInput : $today;
 $endDate = $endInput !== '' ? $endInput : $today;
@@ -151,6 +153,7 @@ $averageDailyTransactions = $dayCount > 0 ? ($transactionCount / $dayCount) : 0;
 $reportMeta = [
     'start_date' => $startDate,
     'end_date' => $endDate,
+    'report_type' => $reportType,
     'generated_at' => $generatedAt,
     'records' => count($registerRows),
     'total_sales' => $totalSales,
@@ -225,19 +228,26 @@ ob_start();
         <div class="col-lg-6 mt-3 mt-lg-0">
             <div class="d-flex flex-column gap-3 align-items-lg-end">
                 <form class="row g-2 align-items-end justify-content-lg-end" method="get" novalidate>
-                    <div class="col-sm-6 col-md-5">
+                    <div class="col-sm-5 col-md-4">
                         <label for="start-date" class="form-label text-muted small mb-1">Start Date</label>
                         <input type="date" id="start-date" name="start" class="form-control" value="<?php echo htmlspecialchars($reportMeta['start_date']); ?>">
                     </div>
-                    <div class="col-sm-6 col-md-5">
+                    <div class="col-sm-5 col-md-4">
                         <label for="end-date" class="form-label text-muted small mb-1">End Date</label>
                         <input type="date" id="end-date" name="end" class="form-control" value="<?php echo htmlspecialchars($reportMeta['end_date']); ?>">
+                    </div>
+                    <div class="col-sm-5 col-md-4">
+                        <label for="report-type" class="form-label text-muted small mb-1">Report Type</label>
+                        <select id="report-type" name="report_type" class="form-select">
+                            <option value="detailed" <?php echo $reportMeta['report_type'] === 'detailed' ? 'selected' : ''; ?>>Detailed</option>
+                            <option value="by_product" <?php echo $reportMeta['report_type'] === 'by_product' ? 'selected' : ''; ?>>By Product</option>
+                        </select>
                     </div>
                     <div class="col-auto">
                         <button type="submit" class="btn btn-primary">View</button>
                     </div>
                     <div class="col-auto">
-                        <a class="btn btn-outline-secondary" href="print_todate_daily_sales.php?start=<?php echo urlencode($reportMeta['start_date']); ?>&end=<?php echo urlencode($reportMeta['end_date']); ?>">
+                        <a class="btn btn-outline-secondary" href="print_todate_daily_sales.php?start=<?php echo urlencode($reportMeta['start_date']); ?>&end=<?php echo urlencode($reportMeta['end_date']); ?>&amp;report_type=<?php echo urlencode($reportMeta['report_type']); ?>">
                             Export Excel
                         </a>
                     </div>

@@ -30,6 +30,8 @@ $reportDateObject = DateTime::createFromFormat('Y-m-d', $reportDate);
 if (!$reportDateObject || $reportDateObject->format('Y-m-d') !== $reportDate) {
     $reportDate = date('Y-m-d');
 }
+$reportTypeInput = isset($_GET['report_type']) ? trim((string)$_GET['report_type']) : '';
+$reportType = in_array($reportTypeInput, ['detailed', 'by_product'], true) ? $reportTypeInput : 'detailed';
 
 $reportDateLabel = date('F d, Y', strtotime($reportDate));
 $generatedAt = date('Y-m-d H:i:s');
@@ -135,6 +137,30 @@ function fetchMonthlySummary($mysqli, $startDate, $endDate)
     return $summary;
 }
 
+function resolveProductTypeGroup($productDescription, $productCode)
+{
+    $description = trim((string)$productDescription);
+    if ($description !== '') {
+        $parts = explode('-', $description, 2);
+        $groupLabel = strtoupper(trim($parts[0]));
+        if ($groupLabel !== '') {
+            return $groupLabel;
+        }
+    }
+
+    $code = trim((string)$productCode);
+    if ($code !== '') {
+        $parts = explode('-', $code);
+        if (isset($parts[1]) && trim((string)$parts[1]) !== '') {
+            return strtoupper(trim((string)$parts[1]));
+        }
+
+        return strtoupper($code);
+    }
+
+    return 'UNCLASSIFIED';
+}
+
 $registerRows = fetchDailyRegisterRows($mysqli, $reportDate);
 $totalSales = 0;
 $uniqueOrders = [];
@@ -156,7 +182,7 @@ $spreadsheet = new Spreadsheet();
 $sheet = $spreadsheet->getActiveSheet();
 $sheet->setTitle('Daily Sales Register');
 
-$sheet->setCellValue('A1', 'DAILY SALES REGISTER');
+$sheet->setCellValue('A1', $reportType === 'by_product' ? 'DAILY SALES REGISTER (BY PRODUCT)' : 'DAILY SALES REGISTER');
 $sheet->getStyle('A1')->getFont()->setBold(true)->setSize(14);
 $sheet->setCellValue('A2', $reportRangeLabel);
 $sheet->setCellValue('A3', 'Generated: ' . $generatedAt);
@@ -210,99 +236,258 @@ $sheet->getStyle('K1:K4')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_R
 $headerRow = 9;
 $dataRow = 10;
 
-$headers = [
-    'NO.',
-    'DATE',
-    'TIME',
-    'DR NO.',
-    'CUSTOMER CODE',
-    'QUANTITY',
-    'PRODUCT CODE',
-    'PRODUCT DESCRIPTION',
-    'UNIT PRICE',
-    'AMOUNT',
-    'AMOUNT RECEIVED',
-    'CHANGE',
-    'CASH',
-    'ON ACCOUNT'
-];
+if ($reportType === 'by_product') {
+    $headers = [
+        'NO.',
+        'PRODUCT TYPE',
+        'PRODUCT CODE',
+        'PRODUCT DESCRIPTION',
+        'QUANTITY',
+        'UNIT PRICE',
+        'AMOUNT',
+        'CASH',
+        'ON ACCOUNT'
+    ];
 
-$sheet->fromArray($headers, null, 'A' . $headerRow);
-$sheet->getStyle("A{$headerRow}:N{$headerRow}")->applyFromArray($headerStyle);
-$sheet->getStyle("A{$headerRow}:N{$headerRow}")
-    ->getAlignment()
-    ->setWrapText(true)
-    ->setHorizontal(Alignment::HORIZONTAL_CENTER)
-    ->setVertical(Alignment::VERTICAL_CENTER);
-$sheet->getStyle("A{$headerRow}:N{$headerRow}")->getFont()->getColor()->setRGB('000000');
+    $groupedRows = [];
+    foreach ($registerRows as $row) {
+        $productCode = isset($row['product_code']) ? (string)$row['product_code'] : '';
+        $productDescription = isset($row['product_description']) ? (string)$row['product_description'] : '';
+        $unitPrice = isset($row['unit_price']) ? (float)$row['unit_price'] : 0;
+        $groupLabel = resolveProductTypeGroup($productDescription, $productCode);
+        $itemKey = $productCode . '|' . $productDescription . '|' . number_format($unitPrice, 4, '.', '');
 
-$currentRow = $dataRow;
-$lineNumber = 1;
-foreach ($registerRows as $row) {
-    $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
-    $orderNoDisplay = $orderNo !== '' ? 'DR' . $orderNo : '';
-    $sheet->setCellValue("A{$currentRow}", $lineNumber);
-    $sheet->setCellValueExplicit("B{$currentRow}", $row['date_label'], DataType::TYPE_STRING);
-    $sheet->setCellValueExplicit("C{$currentRow}", $row['time_label'], DataType::TYPE_STRING);
-    $sheet->setCellValueExplicit("D{$currentRow}", $orderNoDisplay, DataType::TYPE_STRING);
-    $sheet->setCellValueExplicit("E{$currentRow}", $row['customer_code'], DataType::TYPE_STRING);
-    $sheet->setCellValue("F{$currentRow}", $row['qty']);
-    $sheet->setCellValueExplicit("G{$currentRow}", $row['product_code'], DataType::TYPE_STRING);
-    $sheet->setCellValue("H{$currentRow}", $row['product_description']);
-    $sheet->setCellValue("I{$currentRow}", $row['unit_price']);
-    $sheet->setCellValue("J{$currentRow}", $row['amount']);
-    $sheet->setCellValue("K{$currentRow}", $row['amt_received']);
-    $sheet->setCellValue("L{$currentRow}", $row['amt_change']);
-    $sheet->setCellValue("M{$currentRow}", "=K{$currentRow}-L{$currentRow}");
-    $sheet->setCellValue("N{$currentRow}", "=IF(K{$currentRow}=0,J{$currentRow},0)");
-    $currentRow++;
-    $lineNumber++;
-}
+        if (!isset($groupedRows[$groupLabel])) {
+            $groupedRows[$groupLabel] = [
+                'subtotal_qty' => 0,
+                'subtotal_amount' => 0,
+                'subtotal_cash' => 0,
+                'subtotal_on_account' => 0,
+                'items' => []
+            ];
+        }
 
-$lastDetailRow = $currentRow - 1;
-$totalRow = $currentRow;
-$sheet->setCellValue("H{$totalRow}", 'TOTAL');
-$sheet->getStyle("A{$totalRow}:N{$totalRow}")->getFont()->setBold(true);
-if ($lastDetailRow >= $dataRow) {
-    $sheet->setCellValue("J{$totalRow}", "=SUM(J{$dataRow}:J{$lastDetailRow})");
-    $sheet->setCellValue("K{$totalRow}", "=SUM(K{$dataRow}:K{$lastDetailRow})");
-    $sheet->setCellValue("L{$totalRow}", "=SUM(L{$dataRow}:L{$lastDetailRow})");
-    $sheet->setCellValue("M{$totalRow}", "=SUM(M{$dataRow}:M{$lastDetailRow})");
-    $sheet->setCellValue("N{$totalRow}", "=SUM(N{$dataRow}:N{$lastDetailRow})");
+        if (!isset($groupedRows[$groupLabel]['items'][$itemKey])) {
+            $groupedRows[$groupLabel]['items'][$itemKey] = [
+                'product_code' => $productCode,
+                'product_description' => $productDescription,
+                'unit_price' => $unitPrice,
+                'qty' => 0,
+                'amount' => 0,
+                'cash' => 0,
+                'on_account' => 0
+            ];
+        }
+
+        $qty = isset($row['qty']) ? (float)$row['qty'] : 0;
+        $amount = isset($row['amount']) ? (float)$row['amount'] : 0;
+        $amtReceived = isset($row['amt_received']) ? (float)$row['amt_received'] : 0;
+        $amtChange = isset($row['amt_change']) ? (float)$row['amt_change'] : 0;
+        $cash = $amtReceived - $amtChange;
+        if ($cash < 0) {
+            $cash = 0;
+        }
+        $onAccount = $amtReceived <= 0 ? $amount : 0;
+        $groupedRows[$groupLabel]['items'][$itemKey]['qty'] += $qty;
+        $groupedRows[$groupLabel]['items'][$itemKey]['amount'] += $amount;
+        $groupedRows[$groupLabel]['items'][$itemKey]['cash'] += $cash;
+        $groupedRows[$groupLabel]['items'][$itemKey]['on_account'] += $onAccount;
+        $groupedRows[$groupLabel]['subtotal_qty'] += $qty;
+        $groupedRows[$groupLabel]['subtotal_amount'] += $amount;
+        $groupedRows[$groupLabel]['subtotal_cash'] += $cash;
+        $groupedRows[$groupLabel]['subtotal_on_account'] += $onAccount;
+    }
+
+    if (!empty($groupedRows)) {
+        ksort($groupedRows, SORT_NATURAL | SORT_FLAG_CASE);
+        foreach ($groupedRows as &$groupData) {
+            uasort($groupData['items'], function ($left, $right) {
+                $leftCode = strtoupper(trim((string)$left['product_code']));
+                $rightCode = strtoupper(trim((string)$right['product_code']));
+                if ($leftCode === $rightCode) {
+                    return strcasecmp((string)$left['product_description'], (string)$right['product_description']);
+                }
+
+                return strcasecmp($leftCode, $rightCode);
+            });
+        }
+        unset($groupData);
+    }
+
+    $sheet->fromArray($headers, null, 'A' . $headerRow);
+    $sheet->getStyle("A{$headerRow}:I{$headerRow}")->applyFromArray($headerStyle);
+    $sheet->getStyle("A{$headerRow}:I{$headerRow}")
+        ->getAlignment()
+        ->setWrapText(true)
+        ->setHorizontal(Alignment::HORIZONTAL_CENTER)
+        ->setVertical(Alignment::VERTICAL_CENTER);
+    $sheet->getStyle("A{$headerRow}:I{$headerRow}")->getFont()->getColor()->setRGB('000000');
+
+    $currentRow = $dataRow;
+    $lineNumber = 1;
+    $grandTotalQty = 0;
+    $grandTotalAmount = 0;
+    $grandTotalCash = 0;
+    $grandTotalOnAccount = 0;
+
+    foreach ($groupedRows as $groupLabel => $groupData) {
+        foreach ($groupData['items'] as $item) {
+            $sheet->setCellValue("A{$currentRow}", $lineNumber);
+            $sheet->setCellValue("B{$currentRow}", $groupLabel);
+            $sheet->setCellValueExplicit("C{$currentRow}", (string)$item['product_code'], DataType::TYPE_STRING);
+            $sheet->setCellValue("D{$currentRow}", (string)$item['product_description']);
+            $sheet->setCellValue("E{$currentRow}", (float)$item['qty']);
+            $sheet->setCellValue("F{$currentRow}", (float)$item['unit_price']);
+            $sheet->setCellValue("G{$currentRow}", (float)$item['amount']);
+            $sheet->setCellValue("H{$currentRow}", (float)$item['cash']);
+            $sheet->setCellValue("I{$currentRow}", (float)$item['on_account']);
+            $currentRow++;
+            $lineNumber++;
+        }
+
+        $sheet->setCellValue("B{$currentRow}", 'SUBTOTAL - ' . $groupLabel);
+        $sheet->setCellValue("E{$currentRow}", (float)$groupData['subtotal_qty']);
+        $sheet->setCellValue("G{$currentRow}", (float)$groupData['subtotal_amount']);
+        $sheet->setCellValue("H{$currentRow}", (float)$groupData['subtotal_cash']);
+        $sheet->setCellValue("I{$currentRow}", (float)$groupData['subtotal_on_account']);
+        $sheet->getStyle("A{$currentRow}:I{$currentRow}")->getFont()->setBold(true);
+        $currentRow++;
+
+        $grandTotalQty += (float)$groupData['subtotal_qty'];
+        $grandTotalAmount += (float)$groupData['subtotal_amount'];
+        $grandTotalCash += (float)$groupData['subtotal_cash'];
+        $grandTotalOnAccount += (float)$groupData['subtotal_on_account'];
+    }
+
+    $totalRow = $currentRow;
+    $sheet->setCellValue("D{$totalRow}", 'TOTAL');
+    $sheet->setCellValue("E{$totalRow}", $grandTotalQty);
+    $sheet->setCellValue("G{$totalRow}", $grandTotalAmount);
+    $sheet->setCellValue("H{$totalRow}", $grandTotalCash);
+    $sheet->setCellValue("I{$totalRow}", $grandTotalOnAccount);
+    $sheet->getStyle("A{$totalRow}:I{$totalRow}")->getFont()->setBold(true);
+
+    $lastDataRow = $totalRow;
+    if ($lastDataRow >= $headerRow) {
+        $sheet->getStyle("A{$headerRow}:I{$lastDataRow}")->applyFromArray($borderStyle);
+    }
+    if ($lastDataRow >= $dataRow) {
+        $sheet->getStyle("E{$dataRow}:E{$lastDataRow}")->getNumberFormat()->setFormatCode('#,##0.00');
+        $sheet->getStyle("F{$dataRow}:I{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+    }
+    $sheet->getStyle("A{$headerRow}:C{$lastDataRow}")
+        ->getAlignment()
+        ->setHorizontal(Alignment::HORIZONTAL_CENTER)
+        ->setVertical(Alignment::VERTICAL_CENTER);
+    $sheet->getStyle("E{$headerRow}:I{$lastDataRow}")
+        ->getAlignment()
+        ->setHorizontal(Alignment::HORIZONTAL_RIGHT)
+        ->setVertical(Alignment::VERTICAL_CENTER);
+
+    $sheet->getColumnDimension('A')->setAutoSize(false)->setWidth(5);
+    $sheet->getColumnDimension('B')->setAutoSize(false)->setWidth(18);
+    $sheet->getColumnDimension('C')->setAutoSize(false)->setWidth(16);
+    $sheet->getColumnDimension('D')->setAutoSize(false)->setWidth(42);
+    $sheet->getColumnDimension('E')->setAutoSize(false)->setWidth(14);
+    $sheet->getColumnDimension('F')->setAutoSize(false)->setWidth(14);
+    $sheet->getColumnDimension('G')->setAutoSize(false)->setWidth(16);
+    $sheet->getColumnDimension('H')->setAutoSize(false)->setWidth(16);
+    $sheet->getColumnDimension('I')->setAutoSize(false)->setWidth(16);
 } else {
-    $sheet->setCellValue("J{$totalRow}", 0);
-    $sheet->setCellValue("K{$totalRow}", 0);
-    $sheet->setCellValue("L{$totalRow}", 0);
-    $sheet->setCellValue("M{$totalRow}", 0);
-    $sheet->setCellValue("N{$totalRow}", 0);
-}
+    $headers = [
+        'NO.',
+        'DATE',
+        'TIME',
+        'DR NO.',
+        'CUSTOMER CODE',
+        'QUANTITY',
+        'PRODUCT CODE',
+        'PRODUCT DESCRIPTION',
+        'UNIT PRICE',
+        'AMOUNT',
+        'AMOUNT RECEIVED',
+        'CHANGE',
+        'CASH',
+        'ON ACCOUNT'
+    ];
 
-$lastDataRow = $totalRow;
-if ($lastDataRow >= $headerRow) {
-    $sheet->getStyle("A{$headerRow}:N{$lastDataRow}")->applyFromArray($borderStyle);
-}
-if ($lastDataRow >= $dataRow) {
-    $sheet->getStyle("F{$dataRow}:F{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-    $sheet->getStyle("I{$dataRow}:N{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-}
-$sheet->getStyle("B{$headerRow}:G{$lastDataRow}")
-    ->getAlignment()
-    ->setHorizontal(Alignment::HORIZONTAL_CENTER)
-    ->setVertical(Alignment::VERTICAL_CENTER);
+    $sheet->fromArray($headers, null, 'A' . $headerRow);
+    $sheet->getStyle("A{$headerRow}:N{$headerRow}")->applyFromArray($headerStyle);
+    $sheet->getStyle("A{$headerRow}:N{$headerRow}")
+        ->getAlignment()
+        ->setWrapText(true)
+        ->setHorizontal(Alignment::HORIZONTAL_CENTER)
+        ->setVertical(Alignment::VERTICAL_CENTER);
+    $sheet->getStyle("A{$headerRow}:N{$headerRow}")->getFont()->getColor()->setRGB('000000');
 
-foreach (range('A', 'N') as $column) {
-    if (in_array($column, ['B', 'C', 'D', 'E', 'F', 'G'], true)) {
-        $sheet->getColumnDimension($column)->setAutoSize(false)->setWidth(15);
-        continue;
+    $currentRow = $dataRow;
+    $lineNumber = 1;
+    foreach ($registerRows as $row) {
+        $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+        $orderNoDisplay = $orderNo !== '' ? 'DR' . $orderNo : '';
+        $sheet->setCellValue("A{$currentRow}", $lineNumber);
+        $sheet->setCellValueExplicit("B{$currentRow}", $row['date_label'], DataType::TYPE_STRING);
+        $sheet->setCellValueExplicit("C{$currentRow}", $row['time_label'], DataType::TYPE_STRING);
+        $sheet->setCellValueExplicit("D{$currentRow}", $orderNoDisplay, DataType::TYPE_STRING);
+        $sheet->setCellValueExplicit("E{$currentRow}", $row['customer_code'], DataType::TYPE_STRING);
+        $sheet->setCellValue("F{$currentRow}", $row['qty']);
+        $sheet->setCellValueExplicit("G{$currentRow}", $row['product_code'], DataType::TYPE_STRING);
+        $sheet->setCellValue("H{$currentRow}", $row['product_description']);
+        $sheet->setCellValue("I{$currentRow}", $row['unit_price']);
+        $sheet->setCellValue("J{$currentRow}", $row['amount']);
+        $sheet->setCellValue("K{$currentRow}", $row['amt_received']);
+        $sheet->setCellValue("L{$currentRow}", $row['amt_change']);
+        $sheet->setCellValue("M{$currentRow}", "=K{$currentRow}-L{$currentRow}");
+        $sheet->setCellValue("N{$currentRow}", "=IF(K{$currentRow}=0,J{$currentRow},0)");
+        $currentRow++;
+        $lineNumber++;
     }
-    if (in_array($column, ['I', 'J', 'K', 'L', 'M', 'N'], true)) {
-        $sheet->getColumnDimension($column)->setAutoSize(false)->setWidth(20);
-        continue;
+
+    $lastDetailRow = $currentRow - 1;
+    $totalRow = $currentRow;
+    $sheet->setCellValue("H{$totalRow}", 'TOTAL');
+    $sheet->getStyle("A{$totalRow}:N{$totalRow}")->getFont()->setBold(true);
+    if ($lastDetailRow >= $dataRow) {
+        $sheet->setCellValue("J{$totalRow}", "=SUM(J{$dataRow}:J{$lastDetailRow})");
+        $sheet->setCellValue("K{$totalRow}", "=SUM(K{$dataRow}:K{$lastDetailRow})");
+        $sheet->setCellValue("L{$totalRow}", "=SUM(L{$dataRow}:L{$lastDetailRow})");
+        $sheet->setCellValue("M{$totalRow}", "=SUM(M{$dataRow}:M{$lastDetailRow})");
+        $sheet->setCellValue("N{$totalRow}", "=SUM(N{$dataRow}:N{$lastDetailRow})");
+    } else {
+        $sheet->setCellValue("J{$totalRow}", 0);
+        $sheet->setCellValue("K{$totalRow}", 0);
+        $sheet->setCellValue("L{$totalRow}", 0);
+        $sheet->setCellValue("M{$totalRow}", 0);
+        $sheet->setCellValue("N{$totalRow}", 0);
     }
-    $sheet->getColumnDimension($column)->setAutoSize(true);
+
+    $lastDataRow = $totalRow;
+    if ($lastDataRow >= $headerRow) {
+        $sheet->getStyle("A{$headerRow}:N{$lastDataRow}")->applyFromArray($borderStyle);
+    }
+    if ($lastDataRow >= $dataRow) {
+        $sheet->getStyle("F{$dataRow}:F{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+        $sheet->getStyle("I{$dataRow}:N{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+    }
+    $sheet->getStyle("B{$headerRow}:G{$lastDataRow}")
+        ->getAlignment()
+        ->setHorizontal(Alignment::HORIZONTAL_CENTER)
+        ->setVertical(Alignment::VERTICAL_CENTER);
+
+    foreach (range('A', 'N') as $column) {
+        if (in_array($column, ['B', 'C', 'D', 'E', 'F', 'G'], true)) {
+            $sheet->getColumnDimension($column)->setAutoSize(false)->setWidth(15);
+            continue;
+        }
+        if (in_array($column, ['I', 'J', 'K', 'L', 'M', 'N'], true)) {
+            $sheet->getColumnDimension($column)->setAutoSize(false)->setWidth(20);
+            continue;
+        }
+        $sheet->getColumnDimension($column)->setAutoSize(true);
+    }
+    $sheet->getColumnDimension('A')->setAutoSize(false)->setWidth(5);
+    $sheet->getColumnDimension('H')->setAutoSize(false)->setWidth(40);
 }
-$sheet->getColumnDimension('A')->setAutoSize(false)->setWidth(5);
-$sheet->getColumnDimension('H')->setAutoSize(false)->setWidth(40);
 
 $spreadsheet->setActiveSheetIndex(0);
 
@@ -310,7 +495,7 @@ if (ob_get_length()) {
     ob_end_clean();
 }
 
-$filename = 'daily_sales_register_' . $reportDate . '.xlsx';
+$filename = 'daily_sales_register_' . $reportDate . ($reportType === 'by_product' ? '_by_product' : '_detailed') . '.xlsx';
 header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
 header('Content-Disposition: attachment; filename="' . $filename . '"');
 header('Cache-Control: max-age=0');

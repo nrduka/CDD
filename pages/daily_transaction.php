@@ -160,6 +160,9 @@ if (!$reportDateObject || $reportDateObject->format('Y-m-d') !== $reportDate) {
     $reportDate = date('Y-m-d');
 }
 
+$reportTypeInput = isset($_GET['report_type']) ? trim((string)$_GET['report_type']) : '';
+$reportType = in_array($reportTypeInput, ['detailed', 'by_product'], true) ? $reportTypeInput : 'detailed';
+
 function buildCustomerDisplayName($row)
 {
     // Prefer store name, otherwise build a customer name fallback.
@@ -397,6 +400,7 @@ $reportRangeLabel = 'from ' . date('F d', strtotime($reportDate)) . ' to ' . dat
 
 $reportMeta = [
     'report_date' => $reportDate,
+    'report_type' => $reportType,
     'generated_at' => $generatedAt,
     'records' => count($registerRows),
     'total_sales' => $totalSales,
@@ -550,15 +554,22 @@ ob_start();
         <div class="col-lg-6 mt-3 mt-lg-0">
             <div class="d-flex flex-column gap-3 align-items-lg-end">
                 <form class="row g-2 align-items-end justify-content-lg-end" method="get" novalidate>
-                    <div class="col-sm-7 col-md-6">
+                    <div class="col-sm-5 col-md-4">
                         <label for="report-date" class="form-label text-muted small mb-1">Transaction Date</label>
                         <input type="date" id="report-date" name="date" class="form-control" value="<?php echo htmlspecialchars($reportMeta['report_date']); ?>">
+                    </div>
+                    <div class="col-sm-5 col-md-4">
+                        <label for="report-type" class="form-label text-muted small mb-1">Report Type</label>
+                        <select id="report-type" name="report_type" class="form-select">
+                            <option value="detailed" <?php echo $reportMeta['report_type'] === 'detailed' ? 'selected' : ''; ?>>Detailed</option>
+                            <option value="by_product" <?php echo $reportMeta['report_type'] === 'by_product' ? 'selected' : ''; ?>>By Product</option>
+                        </select>
                     </div>
                     <div class="col-auto">
                         <button type="submit" class="btn btn-primary">View</button>
                     </div>
                     <div class="col-auto">
-                        <a class="btn btn-outline-secondary" href="print_daily_transaction.php?date=<?php echo urlencode($reportMeta['report_date']); ?>">
+                        <a class="btn btn-outline-secondary" href="print_daily_transaction.php?date=<?php echo urlencode($reportMeta['report_date']); ?>&amp;report_type=<?php echo urlencode($reportMeta['report_type']); ?>">
                             Export Excel
                         </a>
                     </div>
