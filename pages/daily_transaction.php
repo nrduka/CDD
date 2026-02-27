@@ -161,7 +161,7 @@ if (!$reportDateObject || $reportDateObject->format('Y-m-d') !== $reportDate) {
 }
 
 $reportTypeInput = isset($_GET['report_type']) ? trim((string)$_GET['report_type']) : '';
-$reportType = in_array($reportTypeInput, ['detailed', 'by_product'], true) ? $reportTypeInput : 'detailed';
+$reportType = in_array($reportTypeInput, ['detailed', 'by_product', 'by_customer'], true) ? $reportTypeInput : 'detailed';
 
 function buildCustomerDisplayName($row)
 {
@@ -410,6 +410,66 @@ $reportMeta = [
     'report_range' => $reportRangeLabel
 ];
 
+$customerSummaryRows = [];
+if ($reportType === 'by_customer') {
+    $customerBuckets = [];
+    foreach ($registerRows as $row) {
+        $rawCustomerCode = isset($row['customer_code']) ? (string)$row['customer_code'] : '';
+        $customerCode = trim($rawCustomerCode);
+        if ($customerCode === '') {
+            $customerCode = 'UNASSIGNED';
+        }
+
+        if (!isset($customerBuckets[$customerCode])) {
+            $customerBuckets[$customerCode] = [
+                'customer_code' => $customerCode,
+                'customer_name' => '',
+                'transaction_orders' => [],
+                'qty' => 0.0,
+                'amount' => 0.0,
+                'cash' => 0.0,
+                'on_account' => 0.0
+            ];
+        }
+
+        $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+        if ($orderNo !== '') {
+            $customerBuckets[$customerCode]['transaction_orders'][$orderNo] = true;
+            if ($customerBuckets[$customerCode]['customer_name'] === '' && isset($orders[$orderNo])) {
+                $candidateName = trim((string)(isset($orders[$orderNo]['customer_name']) ? $orders[$orderNo]['customer_name'] : ''));
+                if ($candidateName !== '') {
+                    $customerBuckets[$customerCode]['customer_name'] = $candidateName;
+                }
+            }
+        }
+
+        $customerBuckets[$customerCode]['qty'] += isset($row['qty']) ? (float)$row['qty'] : 0.0;
+        $customerBuckets[$customerCode]['amount'] += isset($row['amount']) ? (float)$row['amount'] : 0.0;
+        $customerBuckets[$customerCode]['cash'] += isset($row['cash']) ? (float)$row['cash'] : 0.0;
+        $customerBuckets[$customerCode]['on_account'] += isset($row['on_account']) ? (float)$row['on_account'] : 0.0;
+    }
+
+    foreach ($customerBuckets as $bucket) {
+        $bucket['transaction_count'] = count($bucket['transaction_orders']);
+        unset($bucket['transaction_orders']);
+        if ($bucket['customer_name'] === '' && $bucket['customer_code'] !== 'UNASSIGNED') {
+            $bucket['customer_name'] = $bucket['customer_code'];
+        }
+        $customerSummaryRows[] = $bucket;
+    }
+
+    usort($customerSummaryRows, function ($left, $right) {
+        $codeCompare = strcasecmp((string)$left['customer_code'], (string)$right['customer_code']);
+        if ($codeCompare !== 0) {
+            return $codeCompare;
+        }
+
+        return strcasecmp((string)$left['customer_name'], (string)$right['customer_name']);
+    });
+
+    $reportMeta['records'] = count($customerSummaryRows);
+}
+
 ob_start();
 ?>
 <link rel="stylesheet" href="<?php echo $baseUrl; ?>/assets/libs/datatables.net-bs5/css/dataTables.bootstrap5.min.css">
@@ -563,6 +623,7 @@ ob_start();
                         <select id="report-type" name="report_type" class="form-select">
                             <option value="detailed" <?php echo $reportMeta['report_type'] === 'detailed' ? 'selected' : ''; ?>>Detailed</option>
                             <option value="by_product" <?php echo $reportMeta['report_type'] === 'by_product' ? 'selected' : ''; ?>>By Product</option>
+                            <option value="by_customer" <?php echo $reportMeta['report_type'] === 'by_customer' ? 'selected' : ''; ?>>By Customer</option>
                         </select>
                     </div>
                     <div class="col-auto">
@@ -612,68 +673,125 @@ ob_start();
                 <?php if (empty($registerRows)): ?>
                     <p class="text-muted mb-0">No transactions were recorded for the selected date.</p>
                 <?php else: ?>
-                    <div class="table-responsive daily-transaction-table" style="overflow-x:auto;">
-                        <table id="daily-transaction-table" class="table table-striped align-middle mb-0 w-100">
-                            <thead>
-                                <tr class="daily-register-head-bottom text-center align-middle">
-                                    <th>No.</th>
-                                    <th>Date</th>
-                                    <th>Time</th>
-                                    <th>DR No.</th>
-                                    <th>Customer Code</th>
-                                    <th class="text-end">Quantity</th>
-                                    <th>Product Code</th>
-                                    <th>Product Description</th>
-                                    <th class="text-end">Unit Price</th>
-                                    <th class="text-end">Amount</th>
-                                    <th class="text-end">Amount Received</th>
-                                    <th class="text-end">Change</th>
-                                    <th class="text-end">Cash</th>
-                                    <th class="text-end">On Account</th>
-                                    <th class="text-center">Action</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php foreach ($registerRows as $index => $row): ?>
-                                    <?php $orderNoDisplay = $row['order_no'] !== '' ? 'DR' . $row['order_no'] : ''; ?>
-                                    <?php $orderVoid = !empty($orders[$row['order_no']]['void_status']); ?>
-                                    <tr>
-                                        <td class="text-center"><?php echo $index + 1; ?></td>
-                                        <td><?php echo htmlspecialchars($row['date']); ?></td>
-                                        <td><?php echo htmlspecialchars($row['time']); ?></td>
-                                        <td>
-                                            <div class="fw-semibold">
-                                                <?php echo htmlspecialchars($orderNoDisplay); ?>
-                                                <?php if ($orderVoid): ?>
-                                                    <span class="badge bg-danger ms-2">Voided</span>
-                                                <?php endif; ?>
-                                            </div>
-                                        </td>
-                                        <td><?php echo htmlspecialchars($row['customer_code']); ?></td>
-                                        <td class="text-end"><?php echo number_format($row['qty'], 2); ?></td>
-                                        <td><?php echo htmlspecialchars($row['product_code']); ?></td>
-                                        <td><?php echo htmlspecialchars($row['product_description']); ?></td>
-                                        <td class="text-end"><?php echo number_format($row['unit_price'], 2); ?></td>
-                                        <td class="text-end"><?php echo number_format($row['amount'], 2); ?></td>
-                                        <td class="text-end"><?php echo number_format($row['amt_received'], 2); ?></td>
-                                        <td class="text-end"><?php echo number_format($row['amt_change'], 2); ?></td>
-                                        <td class="text-end"><?php echo number_format($row['cash'], 2); ?></td>
-                                        <td class="text-end"><?php echo number_format($row['on_account'], 2); ?></td>
-                                        <td class="text-center">
-                                            <div class="d-inline-flex flex-wrap gap-2 justify-content-center">
-                                                <button type="button" class="btn btn-sm btn-outline-primary pos-print-order" data-order-no="<?php echo htmlspecialchars($row['order_no']); ?>">
-                                                    Print
-                                                </button>
-                                                <button type="button" class="btn btn-sm btn-outline-danger pos-void-order" data-order-no="<?php echo htmlspecialchars($row['order_no']); ?>" <?php echo $orderVoid ? 'disabled aria-disabled="true"' : ''; ?>>
-                                                    Void
-                                                </button>
-                                            </div>
-                                        </td>
+                    <?php if ($reportMeta['report_type'] === 'by_customer'): ?>
+                        <?php
+                        $summaryTotalTransactions = 0;
+                        $summaryTotalQty = 0.0;
+                        $summaryTotalAmount = 0.0;
+                        $summaryTotalCash = 0.0;
+                        $summaryTotalOnAccount = 0.0;
+                        ?>
+                        <div class="table-responsive daily-transaction-table" style="overflow-x:auto;">
+                            <table id="daily-transaction-table" class="table table-striped align-middle mb-0 w-100">
+                                <thead>
+                                    <tr class="daily-register-head-bottom text-center align-middle">
+                                        <th>No.</th>
+                                        <th>Customer Code</th>
+                                        <th>Customer Name</th>
+                                        <th class="text-end">Transactions</th>
+                                        <th class="text-end">Total Quantity</th>
+                                        <th class="text-end">Total Amount</th>
+                                        <th class="text-end">Cash</th>
+                                        <th class="text-end">On Account</th>
                                     </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
-                    </div>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($customerSummaryRows as $index => $row): ?>
+                                        <?php
+                                        $summaryTotalTransactions += (int)$row['transaction_count'];
+                                        $summaryTotalQty += (float)$row['qty'];
+                                        $summaryTotalAmount += (float)$row['amount'];
+                                        $summaryTotalCash += (float)$row['cash'];
+                                        $summaryTotalOnAccount += (float)$row['on_account'];
+                                        ?>
+                                        <tr>
+                                            <td class="text-center"><?php echo $index + 1; ?></td>
+                                            <td><?php echo htmlspecialchars($row['customer_code']); ?></td>
+                                            <td><?php echo htmlspecialchars($row['customer_name']); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['transaction_count']); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['qty'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['amount'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['cash'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['on_account'], 2); ?></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                                <tfoot>
+                                    <tr class="fw-semibold">
+                                        <td colspan="3" class="text-end">TOTAL</td>
+                                        <td class="text-end"><?php echo number_format($summaryTotalTransactions); ?></td>
+                                        <td class="text-end"><?php echo number_format($summaryTotalQty, 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($summaryTotalAmount, 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($summaryTotalCash, 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($summaryTotalOnAccount, 2); ?></td>
+                                    </tr>
+                                </tfoot>
+                            </table>
+                        </div>
+                    <?php else: ?>
+                        <div class="table-responsive daily-transaction-table" style="overflow-x:auto;">
+                            <table id="daily-transaction-table" class="table table-striped align-middle mb-0 w-100">
+                                <thead>
+                                    <tr class="daily-register-head-bottom text-center align-middle">
+                                        <th>No.</th>
+                                        <th>Date</th>
+                                        <th>Time</th>
+                                        <th>DR No.</th>
+                                        <th>Customer Code</th>
+                                        <th class="text-end">Quantity</th>
+                                        <th>Product Code</th>
+                                        <th>Product Description</th>
+                                        <th class="text-end">Unit Price</th>
+                                        <th class="text-end">Amount</th>
+                                        <th class="text-end">Amount Received</th>
+                                        <th class="text-end">Change</th>
+                                        <th class="text-end">Cash</th>
+                                        <th class="text-end">On Account</th>
+                                        <th class="text-center">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($registerRows as $index => $row): ?>
+                                        <?php $orderNoDisplay = $row['order_no'] !== '' ? 'DR' . $row['order_no'] : ''; ?>
+                                        <?php $orderVoid = !empty($orders[$row['order_no']]['void_status']); ?>
+                                        <tr>
+                                            <td class="text-center"><?php echo $index + 1; ?></td>
+                                            <td><?php echo htmlspecialchars($row['date']); ?></td>
+                                            <td><?php echo htmlspecialchars($row['time']); ?></td>
+                                            <td>
+                                                <div class="fw-semibold">
+                                                    <?php echo htmlspecialchars($orderNoDisplay); ?>
+                                                    <?php if ($orderVoid): ?>
+                                                        <span class="badge bg-danger ms-2">Voided</span>
+                                                    <?php endif; ?>
+                                                </div>
+                                            </td>
+                                            <td><?php echo htmlspecialchars($row['customer_code']); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['qty'], 2); ?></td>
+                                            <td><?php echo htmlspecialchars($row['product_code']); ?></td>
+                                            <td><?php echo htmlspecialchars($row['product_description']); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['unit_price'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['amount'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['amt_received'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['amt_change'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['cash'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['on_account'], 2); ?></td>
+                                            <td class="text-center">
+                                                <div class="d-inline-flex flex-wrap gap-2 justify-content-center">
+                                                    <button type="button" class="btn btn-sm btn-outline-primary pos-print-order" data-order-no="<?php echo htmlspecialchars($row['order_no']); ?>">
+                                                        Print
+                                                    </button>
+                                                    <button type="button" class="btn btn-sm btn-outline-danger pos-void-order" data-order-no="<?php echo htmlspecialchars($row['order_no']); ?>" <?php echo $orderVoid ? 'disabled aria-disabled="true"' : ''; ?>>
+                                                        Void
+                                                    </button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php endif; ?>
                 <?php endif; ?>
             </div>
         </div>

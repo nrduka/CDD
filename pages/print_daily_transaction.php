@@ -31,7 +31,7 @@ if (!$reportDateObject || $reportDateObject->format('Y-m-d') !== $reportDate) {
     $reportDate = date('Y-m-d');
 }
 $reportTypeInput = isset($_GET['report_type']) ? trim((string)$_GET['report_type']) : '';
-$reportType = in_array($reportTypeInput, ['detailed', 'by_product'], true) ? $reportTypeInput : 'detailed';
+$reportType = in_array($reportTypeInput, ['detailed', 'by_product', 'by_customer'], true) ? $reportTypeInput : 'detailed';
 
 $reportDateLabel = date('F d, Y', strtotime($reportDate));
 $generatedAt = date('Y-m-d H:i:s');
@@ -58,6 +58,35 @@ function resolveSalesDateTime($primaryValue, $fallbackValue)
     return $dateTime ?: null;
 }
 
+function buildCustomerDisplayName($row)
+{
+    $storeName = trim((string)(isset($row['storeName']) ? $row['storeName'] : ''));
+    if ($storeName !== '') {
+        return $storeName;
+    }
+
+    $firstName = trim((string)(isset($row['firstName']) ? $row['firstName'] : ''));
+    $middleName = trim((string)(isset($row['middleName']) ? $row['middleName'] : ''));
+    $lastName = trim((string)(isset($row['lastName']) ? $row['lastName'] : ''));
+    $nameParts = [];
+    if ($firstName !== '') {
+        $nameParts[] = $firstName;
+    }
+    if ($middleName !== '') {
+        $nameParts[] = $middleName;
+    }
+    if ($lastName !== '') {
+        $nameParts[] = $lastName;
+    }
+
+    $displayName = trim(implode(' ', $nameParts));
+    if ($displayName !== '') {
+        return $displayName;
+    }
+
+    return trim((string)(isset($row['customer_code']) ? $row['customer_code'] : ''));
+}
+
 function fetchDailyRegisterRows($mysqli, $reportDate)
 {
     $rows = [];
@@ -71,10 +100,15 @@ function fetchDailyRegisterRows($mysqli, $reportDate)
                    s.date_created,
                    s.date_time_ordered,
                    s.amt_received,
-                   s.amt_change
-            FROM sales s
-            WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) = ?
-            ORDER BY COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created), s.order_no, s.lineitem";
+                   s.amt_change,
+                   c.storeName,
+                   c.firstName,
+                   c.middleName,
+                   c.lastName
+             FROM sales s
+             LEFT JOIN customer_register c ON c.customer_code = s.customer_code
+             WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) = ?
+             ORDER BY COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created), s.order_no, s.lineitem";
 
     $stmt = $mysqli->prepare($sql);
     if ($stmt) {
@@ -90,7 +124,8 @@ function fetchDailyRegisterRows($mysqli, $reportDate)
 
                 $rows[] = [
                     'order_no' => isset($row['order_no']) ? (string)$row['order_no'] : '',
-                    'customer_code' => isset($row['customer_code']) ? (string)$row['customer_code'] : '',
+                    'customer_code' => trim((string)(isset($row['customer_code']) ? $row['customer_code'] : '')),
+                    'customer_name' => buildCustomerDisplayName($row),
                     'qty' => isset($row['qty']) ? (float)$row['qty'] : 0,
                     'product_code' => isset($row['product_code']) ? (string)$row['product_code'] : '',
                     'product_description' => isset($row['product_description']) ? (string)$row['product_description'] : '',
@@ -182,7 +217,13 @@ $spreadsheet = new Spreadsheet();
 $sheet = $spreadsheet->getActiveSheet();
 $sheet->setTitle('Daily Sales Register');
 
-$sheet->setCellValue('A1', $reportType === 'by_product' ? 'DAILY SALES REGISTER (BY PRODUCT)' : 'DAILY SALES REGISTER');
+$sheetTitle = 'DAILY SALES REGISTER';
+if ($reportType === 'by_product') {
+    $sheetTitle = 'DAILY SALES REGISTER (BY PRODUCT)';
+} elseif ($reportType === 'by_customer') {
+    $sheetTitle = 'DAILY SALES REGISTER (BY CUSTOMER)';
+}
+$sheet->setCellValue('A1', $sheetTitle);
 $sheet->getStyle('A1')->getFont()->setBold(true)->setSize(14);
 $sheet->setCellValue('A2', $reportRangeLabel);
 $sheet->setCellValue('A3', 'Generated: ' . $generatedAt);
@@ -393,6 +434,155 @@ if ($reportType === 'by_product') {
     $sheet->getColumnDimension('G')->setAutoSize(false)->setWidth(16);
     $sheet->getColumnDimension('H')->setAutoSize(false)->setWidth(16);
     $sheet->getColumnDimension('I')->setAutoSize(false)->setWidth(16);
+} elseif ($reportType === 'by_customer') {
+    $headers = [
+        'NO.',
+        'CUSTOMER CODE',
+        'CUSTOMER NAME',
+        'TRANSACTION COUNT',
+        'QUANTITY',
+        'AMOUNT',
+        'CASH',
+        'ON ACCOUNT'
+    ];
+
+    $groupedRows = [];
+    foreach ($registerRows as $row) {
+        $customerCode = trim((string)(isset($row['customer_code']) ? $row['customer_code'] : ''));
+        if ($customerCode === '') {
+            $customerCode = 'UNASSIGNED';
+        }
+        $customerName = trim((string)(isset($row['customer_name']) ? $row['customer_name'] : ''));
+        if ($customerName === '' && $customerCode !== 'UNASSIGNED') {
+            $customerName = $customerCode;
+        }
+
+        if (!isset($groupedRows[$customerCode])) {
+            $groupedRows[$customerCode] = [
+                'customer_code' => $customerCode,
+                'customer_name' => $customerName,
+                'transaction_orders' => [],
+                'qty' => 0.0,
+                'amount' => 0.0,
+                'cash' => 0.0,
+                'on_account' => 0.0
+            ];
+        }
+
+        if ($groupedRows[$customerCode]['customer_name'] === '' && $customerName !== '') {
+            $groupedRows[$customerCode]['customer_name'] = $customerName;
+        }
+
+        $orderNo = trim((string)(isset($row['order_no']) ? $row['order_no'] : ''));
+        if ($orderNo !== '') {
+            $groupedRows[$customerCode]['transaction_orders'][$orderNo] = true;
+        }
+
+        $qty = isset($row['qty']) ? (float)$row['qty'] : 0;
+        $amount = isset($row['amount']) ? (float)$row['amount'] : 0;
+        $amtReceived = isset($row['amt_received']) ? (float)$row['amt_received'] : 0;
+        $amtChange = isset($row['amt_change']) ? (float)$row['amt_change'] : 0;
+        $cash = $amtReceived - $amtChange;
+        if ($cash < 0) {
+            $cash = 0;
+        }
+        $onAccount = $amtReceived <= 0 ? $amount : 0;
+
+        $groupedRows[$customerCode]['qty'] += $qty;
+        $groupedRows[$customerCode]['amount'] += $amount;
+        $groupedRows[$customerCode]['cash'] += $cash;
+        $groupedRows[$customerCode]['on_account'] += $onAccount;
+    }
+
+    foreach ($groupedRows as &$groupData) {
+        $groupData['transaction_count'] = count($groupData['transaction_orders']);
+        unset($groupData['transaction_orders']);
+    }
+    unset($groupData);
+
+    if (!empty($groupedRows)) {
+        uasort($groupedRows, function ($left, $right) {
+            $codeCompare = strcasecmp((string)$left['customer_code'], (string)$right['customer_code']);
+            if ($codeCompare !== 0) {
+                return $codeCompare;
+            }
+
+            return strcasecmp((string)$left['customer_name'], (string)$right['customer_name']);
+        });
+    }
+
+    $sheet->fromArray($headers, null, 'A' . $headerRow);
+    $sheet->getStyle("A{$headerRow}:H{$headerRow}")->applyFromArray($headerStyle);
+    $sheet->getStyle("A{$headerRow}:H{$headerRow}")
+        ->getAlignment()
+        ->setWrapText(true)
+        ->setHorizontal(Alignment::HORIZONTAL_CENTER)
+        ->setVertical(Alignment::VERTICAL_CENTER);
+    $sheet->getStyle("A{$headerRow}:H{$headerRow}")->getFont()->getColor()->setRGB('000000');
+
+    $currentRow = $dataRow;
+    $lineNumber = 1;
+    $grandTotalTransactions = 0;
+    $grandTotalQty = 0.0;
+    $grandTotalAmount = 0.0;
+    $grandTotalCash = 0.0;
+    $grandTotalOnAccount = 0.0;
+
+    foreach ($groupedRows as $row) {
+        $transactionCountPerCustomer = isset($row['transaction_count']) ? (int)$row['transaction_count'] : 0;
+        $sheet->setCellValue("A{$currentRow}", $lineNumber);
+        $sheet->setCellValueExplicit("B{$currentRow}", (string)$row['customer_code'], DataType::TYPE_STRING);
+        $sheet->setCellValue("C{$currentRow}", (string)$row['customer_name']);
+        $sheet->setCellValue("D{$currentRow}", $transactionCountPerCustomer);
+        $sheet->setCellValue("E{$currentRow}", (float)$row['qty']);
+        $sheet->setCellValue("F{$currentRow}", (float)$row['amount']);
+        $sheet->setCellValue("G{$currentRow}", (float)$row['cash']);
+        $sheet->setCellValue("H{$currentRow}", (float)$row['on_account']);
+        $currentRow++;
+        $lineNumber++;
+
+        $grandTotalTransactions += $transactionCountPerCustomer;
+        $grandTotalQty += isset($row['qty']) ? (float)$row['qty'] : 0.0;
+        $grandTotalAmount += isset($row['amount']) ? (float)$row['amount'] : 0.0;
+        $grandTotalCash += isset($row['cash']) ? (float)$row['cash'] : 0.0;
+        $grandTotalOnAccount += isset($row['on_account']) ? (float)$row['on_account'] : 0.0;
+    }
+
+    $totalRow = $currentRow;
+    $sheet->setCellValue("C{$totalRow}", 'TOTAL');
+    $sheet->setCellValue("D{$totalRow}", $grandTotalTransactions);
+    $sheet->setCellValue("E{$totalRow}", $grandTotalQty);
+    $sheet->setCellValue("F{$totalRow}", $grandTotalAmount);
+    $sheet->setCellValue("G{$totalRow}", $grandTotalCash);
+    $sheet->setCellValue("H{$totalRow}", $grandTotalOnAccount);
+    $sheet->getStyle("A{$totalRow}:H{$totalRow}")->getFont()->setBold(true);
+
+    $lastDataRow = $totalRow;
+    if ($lastDataRow >= $headerRow) {
+        $sheet->getStyle("A{$headerRow}:H{$lastDataRow}")->applyFromArray($borderStyle);
+    }
+    if ($lastDataRow >= $dataRow) {
+        $sheet->getStyle("D{$dataRow}:D{$lastDataRow}")->getNumberFormat()->setFormatCode('0');
+        $sheet->getStyle("E{$dataRow}:E{$lastDataRow}")->getNumberFormat()->setFormatCode('#,##0.00');
+        $sheet->getStyle("F{$dataRow}:H{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+    }
+    $sheet->getStyle("A{$headerRow}:D{$lastDataRow}")
+        ->getAlignment()
+        ->setHorizontal(Alignment::HORIZONTAL_CENTER)
+        ->setVertical(Alignment::VERTICAL_CENTER);
+    $sheet->getStyle("E{$headerRow}:H{$lastDataRow}")
+        ->getAlignment()
+        ->setHorizontal(Alignment::HORIZONTAL_RIGHT)
+        ->setVertical(Alignment::VERTICAL_CENTER);
+
+    $sheet->getColumnDimension('A')->setAutoSize(false)->setWidth(5);
+    $sheet->getColumnDimension('B')->setAutoSize(false)->setWidth(18);
+    $sheet->getColumnDimension('C')->setAutoSize(false)->setWidth(38);
+    $sheet->getColumnDimension('D')->setAutoSize(false)->setWidth(16);
+    $sheet->getColumnDimension('E')->setAutoSize(false)->setWidth(14);
+    $sheet->getColumnDimension('F')->setAutoSize(false)->setWidth(18);
+    $sheet->getColumnDimension('G')->setAutoSize(false)->setWidth(18);
+    $sheet->getColumnDimension('H')->setAutoSize(false)->setWidth(18);
 } else {
     $headers = [
         'NO.',
@@ -495,7 +685,13 @@ if (ob_get_length()) {
     ob_end_clean();
 }
 
-$filename = 'daily_sales_register_' . $reportDate . ($reportType === 'by_product' ? '_by_product' : '_detailed') . '.xlsx';
+$filenameSuffix = '_detailed';
+if ($reportType === 'by_product') {
+    $filenameSuffix = '_by_product';
+} elseif ($reportType === 'by_customer') {
+    $filenameSuffix = '_by_customer';
+}
+$filename = 'daily_sales_register_' . $reportDate . $filenameSuffix . '.xlsx';
 header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
 header('Content-Disposition: attachment; filename="' . $filename . '"');
 header('Cache-Control: max-age=0');
