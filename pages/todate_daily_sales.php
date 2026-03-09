@@ -21,7 +21,7 @@ $today = date('Y-m-d');
 $startInput = isset($_GET['start']) ? trim((string)$_GET['start']) : '';
 $endInput = isset($_GET['end']) ? trim((string)$_GET['end']) : '';
 $reportTypeInput = isset($_GET['report_type']) ? trim((string)$_GET['report_type']) : '';
-$reportType = in_array($reportTypeInput, ['detailed', 'by_product'], true) ? $reportTypeInput : 'detailed';
+$reportType = in_array($reportTypeInput, ['detailed', 'by_product', 'by_customer'], true) ? $reportTypeInput : 'detailed';
 
 $startDate = $startInput !== '' ? $startInput : $today;
 $endDate = $endInput !== '' ? $endInput : $today;
@@ -56,6 +56,7 @@ if (!isset($mysqli) || !$mysqli) {
     $pageError = 'Database connection unavailable.';
 } else {
     $registerRows = fetchToDateRegisterRows($mysqli, $startDate, $endDate);
+    $registerRows = enrichRegisterRowsWithOrderPayments($registerRows);
     foreach ($registerRows as $row) {
         $totalSales += isset($row['amount']) ? (float)$row['amount'] : 0;
         $orderKey = isset($row['order_no']) ? (string)$row['order_no'] : '';
@@ -82,6 +83,125 @@ function resolveSalesDateTime($primaryValue, $fallbackValue)
     return $dateTime ?: null;
 }
 
+function buildCustomerDisplayName($row)
+{
+    $storeName = trim((string)(isset($row['storeName']) ? $row['storeName'] : ''));
+    if ($storeName !== '') {
+        return $storeName;
+    }
+
+    $firstName = trim((string)(isset($row['firstName']) ? $row['firstName'] : ''));
+    $middleName = trim((string)(isset($row['middleName']) ? $row['middleName'] : ''));
+    $lastName = trim((string)(isset($row['lastName']) ? $row['lastName'] : ''));
+    $nameParts = [];
+    if ($firstName !== '') {
+        $nameParts[] = $firstName;
+    }
+    if ($middleName !== '') {
+        $nameParts[] = $middleName;
+    }
+    if ($lastName !== '') {
+        $nameParts[] = $lastName;
+    }
+
+    $displayName = trim(implode(' ', $nameParts));
+    if ($displayName !== '') {
+        return $displayName;
+    }
+
+    return trim((string)(isset($row['customer_code']) ? $row['customer_code'] : ''));
+}
+
+function resolveProductTypeGroup($productDescription, $productCode)
+{
+    $description = trim((string)$productDescription);
+    if ($description !== '') {
+        $parts = explode('-', $description, 2);
+        $groupLabel = strtoupper(trim($parts[0]));
+        if ($groupLabel !== '') {
+            return $groupLabel;
+        }
+    }
+
+    $code = trim((string)$productCode);
+    if ($code !== '') {
+        $parts = explode('-', $code);
+        if (isset($parts[1]) && trim((string)$parts[1]) !== '') {
+            return strtoupper(trim((string)$parts[1]));
+        }
+
+        return strtoupper($code);
+    }
+
+    return 'UNCLASSIFIED';
+}
+
+function enrichRegisterRowsWithOrderPayments($rows)
+{
+    $orderPayments = [];
+    foreach ($rows as $index => $row) {
+        $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+        $orderKey = $orderNo !== '' ? $orderNo : '__ROW_' . $index;
+        $amount = isset($row['amount']) ? (float)$row['amount'] : 0.0;
+        $amtReceived = isset($row['amt_received']) ? (float)$row['amt_received'] : 0.0;
+        $amtChange = isset($row['amt_change']) ? (float)$row['amt_change'] : 0.0;
+
+        if (!isset($orderPayments[$orderKey])) {
+            $orderPayments[$orderKey] = [
+                'first_index' => $index,
+                'order_amount' => 0.0,
+                'amt_received' => $amtReceived,
+                'amt_change' => $amtChange,
+                'cash' => 0.0,
+                'on_account' => 0.0
+            ];
+        }
+
+        $orderPayments[$orderKey]['order_amount'] += $amount;
+        if ($amtReceived > $orderPayments[$orderKey]['amt_received']) {
+            $orderPayments[$orderKey]['amt_received'] = $amtReceived;
+        }
+        if ($amtChange > $orderPayments[$orderKey]['amt_change']) {
+            $orderPayments[$orderKey]['amt_change'] = $amtChange;
+        }
+    }
+
+    foreach ($orderPayments as &$payment) {
+        $cash = $payment['amt_received'] - $payment['amt_change'];
+        if ($cash < 0) {
+            $cash = 0.0;
+        }
+        $payment['cash'] = $cash;
+        $payment['on_account'] = $payment['amt_received'] <= 0 ? $payment['order_amount'] : 0.0;
+    }
+    unset($payment);
+
+    foreach ($rows as $index => &$row) {
+        $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+        $orderKey = $orderNo !== '' ? $orderNo : '__ROW_' . $index;
+        $payment = $orderPayments[$orderKey];
+        $isPaymentRow = $payment['first_index'] === $index;
+        $lineAmount = isset($row['amount']) ? (float)$row['amount'] : 0.0;
+        $orderAmount = (float)$payment['order_amount'];
+        $allocationRatio = 0.0;
+        if ($orderAmount > 0) {
+            $allocationRatio = $lineAmount / $orderAmount;
+        } elseif ($isPaymentRow) {
+            $allocationRatio = 1.0;
+        }
+
+        $row['amt_received_once'] = $isPaymentRow ? (float)$payment['amt_received'] : 0.0;
+        $row['amt_change_once'] = $isPaymentRow ? (float)$payment['amt_change'] : 0.0;
+        $row['cash_once'] = $isPaymentRow ? (float)$payment['cash'] : 0.0;
+        $row['on_account_once'] = $isPaymentRow ? (float)$payment['on_account'] : 0.0;
+        $row['cash_allocated'] = (float)$payment['cash'] * $allocationRatio;
+        $row['on_account_allocated'] = (float)$payment['on_account'] * $allocationRatio;
+    }
+    unset($row);
+
+    return $rows;
+}
+
 function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
 {
     $rows = [];
@@ -95,10 +215,15 @@ function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
                    s.date_created,
                    s.date_time_ordered,
                    s.amt_received,
-                   s.amt_change
-            FROM sales s
-            WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) BETWEEN ? AND ?
-            ORDER BY COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created), s.order_no, s.lineitem";
+                   s.amt_change,
+                   c.storeName,
+                   c.firstName,
+                   c.middleName,
+                   c.lastName
+             FROM sales s
+             LEFT JOIN customer_register c ON c.customer_code = s.customer_code
+             WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) BETWEEN ? AND ?
+             ORDER BY COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created), s.order_no, s.lineitem";
 
     $stmt = $mysqli->prepare($sql);
     if ($stmt) {
@@ -126,6 +251,7 @@ function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
                     'product_description' => isset($row['product_description']) ? (string)$row['product_description'] : '',
                     'order_no' => isset($row['order_no']) ? (string)$row['order_no'] : '',
                     'customer_code' => isset($row['customer_code']) ? (string)$row['customer_code'] : '',
+                    'customer_name' => buildCustomerDisplayName($row),
                     'qty' => isset($row['qty']) ? (float)$row['qty'] : 0.0,
                     'unit_price' => isset($row['unit_price']) ? (float)$row['unit_price'] : 0.0,
                     'amount' => $amount,
@@ -150,6 +276,129 @@ $transactionCount = count($uniqueOrders);
 $dayCount = $startObject && $endObject ? $startObject->diff($endObject)->days + 1 : 1;
 $averageDailySales = $dayCount > 0 ? ($totalSales / $dayCount) : 0;
 $averageDailyTransactions = $dayCount > 0 ? ($transactionCount / $dayCount) : 0;
+$productSummaryGroups = [];
+$productSummaryRecordCount = 0;
+if ($reportType === 'by_product') {
+    foreach ($registerRows as $row) {
+        $productCode = isset($row['product_code']) ? (string)$row['product_code'] : '';
+        $productDescription = isset($row['product_description']) ? (string)$row['product_description'] : '';
+        $unitPrice = isset($row['unit_price']) ? (float)$row['unit_price'] : 0.0;
+        $groupLabel = resolveProductTypeGroup($productDescription, $productCode);
+        $itemKey = $productCode . '|' . $productDescription . '|' . number_format($unitPrice, 4, '.', '');
+
+        if (!isset($productSummaryGroups[$groupLabel])) {
+            $productSummaryGroups[$groupLabel] = [
+                'subtotal_qty' => 0.0,
+                'subtotal_amount' => 0.0,
+                'subtotal_cash' => 0.0,
+                'subtotal_on_account' => 0.0,
+                'items' => []
+            ];
+        }
+
+        if (!isset($productSummaryGroups[$groupLabel]['items'][$itemKey])) {
+            $productSummaryGroups[$groupLabel]['items'][$itemKey] = [
+                'product_code' => $productCode,
+                'product_description' => $productDescription,
+                'unit_price' => $unitPrice,
+                'qty' => 0.0,
+                'amount' => 0.0,
+                'cash' => 0.0,
+                'on_account' => 0.0
+            ];
+        }
+
+        $qty = isset($row['qty']) ? (float)$row['qty'] : 0.0;
+        $amount = isset($row['amount']) ? (float)$row['amount'] : 0.0;
+        $cash = isset($row['cash_allocated']) ? (float)$row['cash_allocated'] : 0.0;
+        $onAccount = isset($row['on_account_allocated']) ? (float)$row['on_account_allocated'] : 0.0;
+
+        $productSummaryGroups[$groupLabel]['items'][$itemKey]['qty'] += $qty;
+        $productSummaryGroups[$groupLabel]['items'][$itemKey]['amount'] += $amount;
+        $productSummaryGroups[$groupLabel]['items'][$itemKey]['cash'] += $cash;
+        $productSummaryGroups[$groupLabel]['items'][$itemKey]['on_account'] += $onAccount;
+        $productSummaryGroups[$groupLabel]['subtotal_qty'] += $qty;
+        $productSummaryGroups[$groupLabel]['subtotal_amount'] += $amount;
+        $productSummaryGroups[$groupLabel]['subtotal_cash'] += $cash;
+        $productSummaryGroups[$groupLabel]['subtotal_on_account'] += $onAccount;
+    }
+
+    if (!empty($productSummaryGroups)) {
+        ksort($productSummaryGroups, SORT_NATURAL | SORT_FLAG_CASE);
+        foreach ($productSummaryGroups as &$groupData) {
+            uasort($groupData['items'], function ($left, $right) {
+                $leftCode = strtoupper(trim((string)$left['product_code']));
+                $rightCode = strtoupper(trim((string)$right['product_code']));
+                if ($leftCode === $rightCode) {
+                    return strcasecmp((string)$left['product_description'], (string)$right['product_description']);
+                }
+
+                return strcasecmp($leftCode, $rightCode);
+            });
+            $productSummaryRecordCount += count($groupData['items']);
+        }
+        unset($groupData);
+    }
+}
+$customerSummaryRows = [];
+if ($reportType === 'by_customer') {
+    $customerBuckets = [];
+    foreach ($registerRows as $row) {
+        $rawCustomerCode = isset($row['customer_code']) ? (string)$row['customer_code'] : '';
+        $customerCode = trim($rawCustomerCode);
+        if ($customerCode === '') {
+            $customerCode = 'UNASSIGNED';
+        }
+        $customerName = trim((string)(isset($row['customer_name']) ? $row['customer_name'] : ''));
+        if ($customerName === '' && $customerCode !== 'UNASSIGNED') {
+            $customerName = $customerCode;
+        }
+
+        if (!isset($customerBuckets[$customerCode])) {
+            $customerBuckets[$customerCode] = [
+                'customer_code' => $customerCode,
+                'customer_name' => $customerName,
+                'transaction_orders' => [],
+                'qty' => 0.0,
+                'amount' => 0.0,
+                'cash' => 0.0,
+                'on_account' => 0.0
+            ];
+        }
+
+        if ($customerBuckets[$customerCode]['customer_name'] === '' && $customerName !== '') {
+            $customerBuckets[$customerCode]['customer_name'] = $customerName;
+        }
+
+        $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+        if ($orderNo !== '') {
+            $customerBuckets[$customerCode]['transaction_orders'][$orderNo] = true;
+        }
+
+        $customerBuckets[$customerCode]['qty'] += isset($row['qty']) ? (float)$row['qty'] : 0.0;
+        $customerBuckets[$customerCode]['amount'] += isset($row['amount']) ? (float)$row['amount'] : 0.0;
+        $customerBuckets[$customerCode]['cash'] += isset($row['cash_once']) ? (float)$row['cash_once'] : 0.0;
+        $customerBuckets[$customerCode]['on_account'] += isset($row['on_account_once']) ? (float)$row['on_account_once'] : 0.0;
+    }
+
+    foreach ($customerBuckets as $bucket) {
+        $bucket['transaction_count'] = count($bucket['transaction_orders']);
+        unset($bucket['transaction_orders']);
+        if ($bucket['customer_name'] === '' && $bucket['customer_code'] !== 'UNASSIGNED') {
+            $bucket['customer_name'] = $bucket['customer_code'];
+        }
+        $customerSummaryRows[] = $bucket;
+    }
+
+    usort($customerSummaryRows, function ($left, $right) {
+        $codeCompare = strcasecmp((string)$left['customer_code'], (string)$right['customer_code']);
+        if ($codeCompare !== 0) {
+            return $codeCompare;
+        }
+
+        return strcasecmp((string)$left['customer_name'], (string)$right['customer_name']);
+    });
+}
 $reportMeta = [
     'start_date' => $startDate,
     'end_date' => $endDate,
@@ -161,6 +410,11 @@ $reportMeta = [
     'average_daily_sales' => $averageDailySales,
     'average_daily_transactions' => $averageDailyTransactions
 ];
+if ($reportType === 'by_customer') {
+    $reportMeta['records'] = count($customerSummaryRows);
+} elseif ($reportType === 'by_product') {
+    $reportMeta['records'] = $productSummaryRecordCount;
+}
 
 ob_start();
 ?>
@@ -241,6 +495,7 @@ ob_start();
                         <select id="report-type" name="report_type" class="form-select">
                             <option value="detailed" <?php echo $reportMeta['report_type'] === 'detailed' ? 'selected' : ''; ?>>Detailed</option>
                             <option value="by_product" <?php echo $reportMeta['report_type'] === 'by_product' ? 'selected' : ''; ?>>By Product</option>
+                            <option value="by_customer" <?php echo $reportMeta['report_type'] === 'by_customer' ? 'selected' : ''; ?>>By Customer</option>
                         </select>
                     </div>
                     <div class="col-auto">
@@ -290,49 +545,175 @@ ob_start();
                 <?php if (empty($registerRows)): ?>
                     <p class="text-muted mb-0">No sales were recorded for the selected date range.</p>
                 <?php else: ?>
-                    <div class="table-responsive todate-daily-sales-table">
-                        <table id="todate-daily-sales-table" class="table table-striped align-middle mb-0 w-100">
-                            <thead>
-                                <tr class="daily-register-head-bottom text-center align-middle">
-                                    <th>No.</th>
-                                    <th>Date</th>
-                                    <th>Time</th>
-                                    <th>DR No.</th>
-                                    <th>Customer Code</th>
-                                    <th class="text-end">Quantity</th>
-                                    <th>Product Code</th>
-                                    <th>Product Description</th>
-                                    <th class="text-end">Unit Price</th>
-                                    <th class="text-end">Amount</th>
-                                    <th class="text-end">Amount Received</th>
-                                    <th class="text-end">Change</th>
-                                    <th class="text-end">Cash</th>
-                                    <th class="text-end">On Account</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php foreach ($registerRows as $index => $row): ?>
-                                    <?php $orderNoDisplay = $row['order_no'] !== '' ? 'DR' . $row['order_no'] : ''; ?>
-                                    <tr>
-                                        <td class="text-center"><?php echo $index + 1; ?></td>
-                                        <td><?php echo htmlspecialchars($row['date']); ?></td>
-                                        <td><?php echo htmlspecialchars($row['time']); ?></td>
-                                        <td><?php echo htmlspecialchars($orderNoDisplay); ?></td>
-                                        <td><?php echo htmlspecialchars($row['customer_code']); ?></td>
-                                        <td class="text-end"><?php echo number_format($row['qty'], 2); ?></td>
-                                        <td><?php echo htmlspecialchars($row['product_code']); ?></td>
-                                        <td><?php echo htmlspecialchars($row['product_description']); ?></td>
-                                        <td class="text-end"><?php echo number_format($row['unit_price'], 2); ?></td>
-                                        <td class="text-end"><?php echo number_format($row['amount'], 2); ?></td>
-                                        <td class="text-end"><?php echo number_format($row['amt_received'], 2); ?></td>
-                                        <td class="text-end"><?php echo number_format($row['amt_change'], 2); ?></td>
-                                        <td class="text-end"><?php echo number_format($row['cash'], 2); ?></td>
-                                        <td class="text-end"><?php echo number_format($row['on_account'], 2); ?></td>
+                    <?php if ($reportMeta['report_type'] === 'by_customer'): ?>
+                        <?php
+                        $summaryTotalTransactions = 0;
+                        $summaryTotalQty = 0.0;
+                        $summaryTotalAmount = 0.0;
+                        $summaryTotalCash = 0.0;
+                        $summaryTotalOnAccount = 0.0;
+                        ?>
+                        <div class="table-responsive todate-daily-sales-table">
+                            <table id="todate-daily-sales-table" class="table table-striped align-middle mb-0 w-100">
+                                <thead>
+                                    <tr class="daily-register-head-bottom text-center align-middle">
+                                        <th>No.</th>
+                                        <th>Customer Code</th>
+                                        <th>Customer Name</th>
+                                        <th class="text-end">Transactions</th>
+                                        <th class="text-end">Total Quantity</th>
+                                        <th class="text-end">Total Amount</th>
+                                        <th class="text-end">Cash</th>
+                                        <th class="text-end">On Account</th>
                                     </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
-                    </div>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($customerSummaryRows as $index => $row): ?>
+                                        <?php
+                                        $summaryTotalTransactions += (int)$row['transaction_count'];
+                                        $summaryTotalQty += (float)$row['qty'];
+                                        $summaryTotalAmount += (float)$row['amount'];
+                                        $summaryTotalCash += (float)$row['cash'];
+                                        $summaryTotalOnAccount += (float)$row['on_account'];
+                                        ?>
+                                        <tr>
+                                            <td class="text-center"><?php echo $index + 1; ?></td>
+                                            <td><?php echo htmlspecialchars($row['customer_code']); ?></td>
+                                            <td><?php echo htmlspecialchars($row['customer_name']); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['transaction_count']); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['qty'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['amount'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['cash'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['on_account'], 2); ?></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                                <tfoot>
+                                    <tr class="fw-semibold">
+                                        <td colspan="3" class="text-end">TOTAL</td>
+                                        <td class="text-end"><?php echo number_format($summaryTotalTransactions); ?></td>
+                                        <td class="text-end"><?php echo number_format($summaryTotalQty, 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($summaryTotalAmount, 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($summaryTotalCash, 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($summaryTotalOnAccount, 2); ?></td>
+                                    </tr>
+                                </tfoot>
+                            </table>
+                        </div>
+                    <?php elseif ($reportMeta['report_type'] === 'by_product'): ?>
+                        <div class="table-responsive todate-daily-sales-table">
+                            <table id="todate-daily-sales-table" class="table table-striped align-middle mb-0 w-100">
+                                <thead>
+                                    <tr class="daily-register-head-bottom text-center align-middle">
+                                        <th>No.</th>
+                                        <th>Product Type</th>
+                                        <th>Product Code</th>
+                                        <th>Product Description</th>
+                                        <th class="text-end">Quantity</th>
+                                        <th class="text-end">Unit Price</th>
+                                        <th class="text-end">Amount</th>
+                                        <th class="text-end">Cash</th>
+                                        <th class="text-end">On Account</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php
+                                    $lineNumber = 1;
+                                    $grandTotalQty = 0.0;
+                                    $grandTotalAmount = 0.0;
+                                    $grandTotalCash = 0.0;
+                                    $grandTotalOnAccount = 0.0;
+                                    ?>
+                                    <?php foreach ($productSummaryGroups as $groupLabel => $groupData): ?>
+                                        <?php foreach ($groupData['items'] as $item): ?>
+                                            <tr>
+                                                <td class="text-center"><?php echo $lineNumber; ?></td>
+                                                <td><?php echo htmlspecialchars($groupLabel); ?></td>
+                                                <td><?php echo htmlspecialchars($item['product_code']); ?></td>
+                                                <td><?php echo htmlspecialchars($item['product_description']); ?></td>
+                                                <td class="text-end"><?php echo number_format($item['qty'], 2); ?></td>
+                                                <td class="text-end"><?php echo number_format($item['unit_price'], 2); ?></td>
+                                                <td class="text-end"><?php echo number_format($item['amount'], 2); ?></td>
+                                                <td class="text-end"><?php echo number_format($item['cash'], 2); ?></td>
+                                                <td class="text-end"><?php echo number_format($item['on_account'], 2); ?></td>
+                                            </tr>
+                                            <?php $lineNumber++; ?>
+                                        <?php endforeach; ?>
+                                        <tr class="fw-semibold">
+                                            <td></td>
+                                            <td colspan="3">SUBTOTAL - <?php echo htmlspecialchars($groupLabel); ?></td>
+                                            <td class="text-end"><?php echo number_format($groupData['subtotal_qty'], 2); ?></td>
+                                            <td></td>
+                                            <td class="text-end"><?php echo number_format($groupData['subtotal_amount'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($groupData['subtotal_cash'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($groupData['subtotal_on_account'], 2); ?></td>
+                                        </tr>
+                                        <?php
+                                        $grandTotalQty += (float)$groupData['subtotal_qty'];
+                                        $grandTotalAmount += (float)$groupData['subtotal_amount'];
+                                        $grandTotalCash += (float)$groupData['subtotal_cash'];
+                                        $grandTotalOnAccount += (float)$groupData['subtotal_on_account'];
+                                        ?>
+                                    <?php endforeach; ?>
+                                </tbody>
+                                <tfoot>
+                                    <tr class="fw-bold">
+                                        <td></td>
+                                        <td colspan="3" class="text-end">TOTAL</td>
+                                        <td class="text-end"><?php echo number_format($grandTotalQty, 2); ?></td>
+                                        <td></td>
+                                        <td class="text-end"><?php echo number_format($grandTotalAmount, 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($grandTotalCash, 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($grandTotalOnAccount, 2); ?></td>
+                                    </tr>
+                                </tfoot>
+                            </table>
+                        </div>
+                    <?php else: ?>
+                        <div class="table-responsive todate-daily-sales-table">
+                            <table id="todate-daily-sales-table" class="table table-striped align-middle mb-0 w-100">
+                                <thead>
+                                    <tr class="daily-register-head-bottom text-center align-middle">
+                                        <th>No.</th>
+                                        <th>Date</th>
+                                        <th>Time</th>
+                                        <th>DR No.</th>
+                                        <th>Customer Code</th>
+                                        <th class="text-end">Quantity</th>
+                                        <th>Product Code</th>
+                                        <th>Product Description</th>
+                                        <th class="text-end">Unit Price</th>
+                                        <th class="text-end">Amount</th>
+                                        <th class="text-end">Amount Received</th>
+                                        <th class="text-end">Change</th>
+                                        <th class="text-end">Cash</th>
+                                        <th class="text-end">On Account</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($registerRows as $index => $row): ?>
+                                        <?php $orderNoDisplay = $row['order_no'] !== '' ? 'DR' . $row['order_no'] : ''; ?>
+                                        <tr>
+                                            <td class="text-center"><?php echo $index + 1; ?></td>
+                                            <td><?php echo htmlspecialchars($row['date']); ?></td>
+                                            <td><?php echo htmlspecialchars($row['time']); ?></td>
+                                            <td><?php echo htmlspecialchars($orderNoDisplay); ?></td>
+                                            <td><?php echo htmlspecialchars($row['customer_code']); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['qty'], 2); ?></td>
+                                            <td><?php echo htmlspecialchars($row['product_code']); ?></td>
+                                            <td><?php echo htmlspecialchars($row['product_description']); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['unit_price'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['amount'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['amt_received_once'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['amt_change_once'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['cash_once'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['on_account_once'], 2); ?></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php endif; ?>
                 <?php endif; ?>
             </div>
         </div>

@@ -196,7 +196,74 @@ function resolveProductTypeGroup($productDescription, $productCode)
     return 'UNCLASSIFIED';
 }
 
+function enrichRegisterRowsWithOrderPayments($rows)
+{
+    $orderPayments = [];
+    foreach ($rows as $index => $row) {
+        $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+        $orderKey = $orderNo !== '' ? $orderNo : '__ROW_' . $index;
+        $amount = isset($row['amount']) ? (float)$row['amount'] : 0.0;
+        $amtReceived = isset($row['amt_received']) ? (float)$row['amt_received'] : 0.0;
+        $amtChange = isset($row['amt_change']) ? (float)$row['amt_change'] : 0.0;
+
+        if (!isset($orderPayments[$orderKey])) {
+            $orderPayments[$orderKey] = [
+                'first_index' => $index,
+                'order_amount' => 0.0,
+                'amt_received' => $amtReceived,
+                'amt_change' => $amtChange,
+                'cash' => 0.0,
+                'on_account' => 0.0
+            ];
+        }
+
+        $orderPayments[$orderKey]['order_amount'] += $amount;
+        if ($amtReceived > $orderPayments[$orderKey]['amt_received']) {
+            $orderPayments[$orderKey]['amt_received'] = $amtReceived;
+        }
+        if ($amtChange > $orderPayments[$orderKey]['amt_change']) {
+            $orderPayments[$orderKey]['amt_change'] = $amtChange;
+        }
+    }
+
+    foreach ($orderPayments as &$payment) {
+        $cash = $payment['amt_received'] - $payment['amt_change'];
+        if ($cash < 0) {
+            $cash = 0.0;
+        }
+        $payment['cash'] = $cash;
+        $payment['on_account'] = $payment['amt_received'] <= 0 ? $payment['order_amount'] : 0.0;
+    }
+    unset($payment);
+
+    foreach ($rows as $index => &$row) {
+        $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+        $orderKey = $orderNo !== '' ? $orderNo : '__ROW_' . $index;
+        $payment = $orderPayments[$orderKey];
+        $isPaymentRow = $payment['first_index'] === $index;
+        $lineAmount = isset($row['amount']) ? (float)$row['amount'] : 0.0;
+        $orderAmount = (float)$payment['order_amount'];
+        $allocationRatio = 0.0;
+        if ($orderAmount > 0) {
+            $allocationRatio = $lineAmount / $orderAmount;
+        } elseif ($isPaymentRow) {
+            $allocationRatio = 1.0;
+        }
+
+        $row['amt_received_once'] = $isPaymentRow ? (float)$payment['amt_received'] : 0.0;
+        $row['amt_change_once'] = $isPaymentRow ? (float)$payment['amt_change'] : 0.0;
+        $row['cash_once'] = $isPaymentRow ? (float)$payment['cash'] : 0.0;
+        $row['on_account_once'] = $isPaymentRow ? (float)$payment['on_account'] : 0.0;
+        $row['cash_allocated'] = (float)$payment['cash'] * $allocationRatio;
+        $row['on_account_allocated'] = (float)$payment['on_account'] * $allocationRatio;
+    }
+    unset($row);
+
+    return $rows;
+}
+
 $registerRows = fetchDailyRegisterRows($mysqli, $reportDate);
+$registerRows = enrichRegisterRowsWithOrderPayments($registerRows);
 $totalSales = 0;
 $uniqueOrders = [];
 foreach ($registerRows as $row) {
@@ -322,13 +389,8 @@ if ($reportType === 'by_product') {
 
         $qty = isset($row['qty']) ? (float)$row['qty'] : 0;
         $amount = isset($row['amount']) ? (float)$row['amount'] : 0;
-        $amtReceived = isset($row['amt_received']) ? (float)$row['amt_received'] : 0;
-        $amtChange = isset($row['amt_change']) ? (float)$row['amt_change'] : 0;
-        $cash = $amtReceived - $amtChange;
-        if ($cash < 0) {
-            $cash = 0;
-        }
-        $onAccount = $amtReceived <= 0 ? $amount : 0;
+        $cash = isset($row['cash_allocated']) ? (float)$row['cash_allocated'] : 0.0;
+        $onAccount = isset($row['on_account_allocated']) ? (float)$row['on_account_allocated'] : 0.0;
         $groupedRows[$groupLabel]['items'][$itemKey]['qty'] += $qty;
         $groupedRows[$groupLabel]['items'][$itemKey]['amount'] += $amount;
         $groupedRows[$groupLabel]['items'][$itemKey]['cash'] += $cash;
@@ -480,13 +542,8 @@ if ($reportType === 'by_product') {
 
         $qty = isset($row['qty']) ? (float)$row['qty'] : 0;
         $amount = isset($row['amount']) ? (float)$row['amount'] : 0;
-        $amtReceived = isset($row['amt_received']) ? (float)$row['amt_received'] : 0;
-        $amtChange = isset($row['amt_change']) ? (float)$row['amt_change'] : 0;
-        $cash = $amtReceived - $amtChange;
-        if ($cash < 0) {
-            $cash = 0;
-        }
-        $onAccount = $amtReceived <= 0 ? $amount : 0;
+        $cash = isset($row['cash_once']) ? (float)$row['cash_once'] : 0.0;
+        $onAccount = isset($row['on_account_once']) ? (float)$row['on_account_once'] : 0.0;
 
         $groupedRows[$customerCode]['qty'] += $qty;
         $groupedRows[$customerCode]['amount'] += $amount;
@@ -625,10 +682,10 @@ if ($reportType === 'by_product') {
         $sheet->setCellValue("H{$currentRow}", $row['product_description']);
         $sheet->setCellValue("I{$currentRow}", $row['unit_price']);
         $sheet->setCellValue("J{$currentRow}", $row['amount']);
-        $sheet->setCellValue("K{$currentRow}", $row['amt_received']);
-        $sheet->setCellValue("L{$currentRow}", $row['amt_change']);
-        $sheet->setCellValue("M{$currentRow}", "=K{$currentRow}-L{$currentRow}");
-        $sheet->setCellValue("N{$currentRow}", "=IF(K{$currentRow}=0,J{$currentRow},0)");
+        $sheet->setCellValue("K{$currentRow}", isset($row['amt_received_once']) ? (float)$row['amt_received_once'] : 0.0);
+        $sheet->setCellValue("L{$currentRow}", isset($row['amt_change_once']) ? (float)$row['amt_change_once'] : 0.0);
+        $sheet->setCellValue("M{$currentRow}", isset($row['cash_once']) ? (float)$row['cash_once'] : 0.0);
+        $sheet->setCellValue("N{$currentRow}", isset($row['on_account_once']) ? (float)$row['on_account_once'] : 0.0);
         $currentRow++;
         $lineNumber++;
     }

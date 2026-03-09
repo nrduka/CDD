@@ -218,6 +218,62 @@ function resolveSalesDateTime($primaryValue, $fallbackValue)
     return $dateTime ?: null;
 }
 
+function enrichRegisterRowsWithOrderPayments($rows)
+{
+    $orderPayments = [];
+    foreach ($rows as $index => $row) {
+        $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+        $orderKey = $orderNo !== '' ? $orderNo : '__ROW_' . $index;
+        $amount = isset($row['amount']) ? (float)$row['amount'] : 0.0;
+        $amtReceived = isset($row['amt_received']) ? (float)$row['amt_received'] : 0.0;
+        $amtChange = isset($row['amt_change']) ? (float)$row['amt_change'] : 0.0;
+
+        if (!isset($orderPayments[$orderKey])) {
+            $orderPayments[$orderKey] = [
+                'first_index' => $index,
+                'order_amount' => 0.0,
+                'amt_received' => $amtReceived,
+                'amt_change' => $amtChange,
+                'cash' => 0.0,
+                'on_account' => 0.0
+            ];
+        }
+
+        $orderPayments[$orderKey]['order_amount'] += $amount;
+        if ($amtReceived > $orderPayments[$orderKey]['amt_received']) {
+            $orderPayments[$orderKey]['amt_received'] = $amtReceived;
+        }
+        if ($amtChange > $orderPayments[$orderKey]['amt_change']) {
+            $orderPayments[$orderKey]['amt_change'] = $amtChange;
+        }
+    }
+
+    foreach ($orderPayments as &$payment) {
+        $cash = $payment['amt_received'] - $payment['amt_change'];
+        if ($cash < 0) {
+            $cash = 0.0;
+        }
+        $payment['cash'] = $cash;
+        $payment['on_account'] = $payment['amt_received'] <= 0 ? $payment['order_amount'] : 0.0;
+    }
+    unset($payment);
+
+    foreach ($rows as $index => &$row) {
+        $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+        $orderKey = $orderNo !== '' ? $orderNo : '__ROW_' . $index;
+        $payment = $orderPayments[$orderKey];
+        $isPaymentRow = $payment['first_index'] === $index;
+
+        $row['amt_received_once'] = $isPaymentRow ? (float)$payment['amt_received'] : 0.0;
+        $row['amt_change_once'] = $isPaymentRow ? (float)$payment['amt_change'] : 0.0;
+        $row['cash_once'] = $isPaymentRow ? (float)$payment['cash'] : 0.0;
+        $row['on_account_once'] = $isPaymentRow ? (float)$payment['on_account'] : 0.0;
+    }
+    unset($row);
+
+    return $rows;
+}
+
 function fetch_monthly_summary($mysqli, $startDate, $endDate)
 {
     // Month-to-date totals for averages.
@@ -390,6 +446,7 @@ if (!isset($mysqli) || !$mysqli) {
     }
 }
 
+$registerRows = enrichRegisterRowsWithOrderPayments($registerRows);
 $transactionCount = count($uniqueOrders);
 $dayCount = 1;
 $averageDailySales = $dayCount > 0 ? ($totalSales / $dayCount) : 0;
@@ -445,8 +502,8 @@ if ($reportType === 'by_customer') {
 
         $customerBuckets[$customerCode]['qty'] += isset($row['qty']) ? (float)$row['qty'] : 0.0;
         $customerBuckets[$customerCode]['amount'] += isset($row['amount']) ? (float)$row['amount'] : 0.0;
-        $customerBuckets[$customerCode]['cash'] += isset($row['cash']) ? (float)$row['cash'] : 0.0;
-        $customerBuckets[$customerCode]['on_account'] += isset($row['on_account']) ? (float)$row['on_account'] : 0.0;
+        $customerBuckets[$customerCode]['cash'] += isset($row['cash_once']) ? (float)$row['cash_once'] : 0.0;
+        $customerBuckets[$customerCode]['on_account'] += isset($row['on_account_once']) ? (float)$row['on_account_once'] : 0.0;
     }
 
     foreach ($customerBuckets as $bucket) {
@@ -772,10 +829,10 @@ ob_start();
                                             <td><?php echo htmlspecialchars($row['product_description']); ?></td>
                                             <td class="text-end"><?php echo number_format($row['unit_price'], 2); ?></td>
                                             <td class="text-end"><?php echo number_format($row['amount'], 2); ?></td>
-                                            <td class="text-end"><?php echo number_format($row['amt_received'], 2); ?></td>
-                                            <td class="text-end"><?php echo number_format($row['amt_change'], 2); ?></td>
-                                            <td class="text-end"><?php echo number_format($row['cash'], 2); ?></td>
-                                            <td class="text-end"><?php echo number_format($row['on_account'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['amt_received_once'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['amt_change_once'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['cash_once'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($row['on_account_once'], 2); ?></td>
                                             <td class="text-center">
                                                 <div class="d-inline-flex flex-wrap gap-2 justify-content-center">
                                                     <button type="button" class="btn btn-sm btn-outline-primary pos-print-order" data-order-no="<?php echo htmlspecialchars($row['order_no']); ?>">

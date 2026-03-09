@@ -28,7 +28,7 @@ $today = date('Y-m-d');
 $startInput = isset($_GET['start']) ? trim((string)$_GET['start']) : '';
 $endInput = isset($_GET['end']) ? trim((string)$_GET['end']) : '';
 $reportTypeInput = isset($_GET['report_type']) ? trim((string)$_GET['report_type']) : '';
-$reportType = in_array($reportTypeInput, ['detailed', 'by_product'], true) ? $reportTypeInput : 'detailed';
+$reportType = in_array($reportTypeInput, ['detailed', 'by_product', 'by_customer'], true) ? $reportTypeInput : 'detailed';
 
 $startDate = $startInput !== '' ? $startInput : $today;
 $endDate = $endInput !== '' ? $endInput : $today;
@@ -78,6 +78,35 @@ function resolveSalesDateTime($primaryValue, $fallbackValue)
     return $dateTime ?: null;
 }
 
+function buildCustomerDisplayName($row)
+{
+    $storeName = trim((string)(isset($row['storeName']) ? $row['storeName'] : ''));
+    if ($storeName !== '') {
+        return $storeName;
+    }
+
+    $firstName = trim((string)(isset($row['firstName']) ? $row['firstName'] : ''));
+    $middleName = trim((string)(isset($row['middleName']) ? $row['middleName'] : ''));
+    $lastName = trim((string)(isset($row['lastName']) ? $row['lastName'] : ''));
+    $nameParts = [];
+    if ($firstName !== '') {
+        $nameParts[] = $firstName;
+    }
+    if ($middleName !== '') {
+        $nameParts[] = $middleName;
+    }
+    if ($lastName !== '') {
+        $nameParts[] = $lastName;
+    }
+
+    $displayName = trim(implode(' ', $nameParts));
+    if ($displayName !== '') {
+        return $displayName;
+    }
+
+    return trim((string)(isset($row['customer_code']) ? $row['customer_code'] : ''));
+}
+
 function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
 {
     $rows = [];
@@ -91,10 +120,15 @@ function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
                    s.date_created,
                    s.date_time_ordered,
                    s.amt_received,
-                   s.amt_change
-            FROM sales s
-            WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) BETWEEN ? AND ?
-            ORDER BY COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created), s.order_no, s.lineitem";
+                   s.amt_change,
+                   c.storeName,
+                   c.firstName,
+                   c.middleName,
+                   c.lastName
+             FROM sales s
+             LEFT JOIN customer_register c ON c.customer_code = s.customer_code
+             WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) BETWEEN ? AND ?
+             ORDER BY COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created), s.order_no, s.lineitem";
 
     $stmt = $mysqli->prepare($sql);
     if ($stmt) {
@@ -120,6 +154,7 @@ function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
                 $rows[] = [
                     'order_no' => isset($row['order_no']) ? (string)$row['order_no'] : '',
                     'customer_code' => isset($row['customer_code']) ? (string)$row['customer_code'] : '',
+                    'customer_name' => buildCustomerDisplayName($row),
                     'qty' => isset($row['qty']) ? (float)$row['qty'] : 0.0,
                     'product_code' => isset($row['product_code']) ? (string)$row['product_code'] : '',
                     'product_description' => isset($row['product_description']) ? (string)$row['product_description'] : '',
@@ -141,45 +176,114 @@ function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
     return $rows;
 }
 
-function fetchToDateSummaryByDate($mysqli, $startDate, $endDate)
+function enrichRegisterRowsWithOrderPayments($rows)
 {
-    $totals = [];
-    $sql = "SELECT DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) AS sale_date,
-                   COUNT(DISTINCT s.order_no) AS total_transactions,
-                   SUM(COALESCE(s.qty, 0)) AS qty_total,
-                   SUM(COALESCE(s.amount, 0)) AS amount_total,
-                   SUM(COALESCE(s.amt_received, 0)) AS amt_received_total,
-                   SUM(COALESCE(s.amt_change, 0)) AS amt_change_total,
-                   SUM(CASE WHEN COALESCE(s.amt_received, 0) <= 0 THEN COALESCE(s.amount, 0) ELSE 0 END) AS on_account_total,
-                   SUM(CASE WHEN (COALESCE(s.amt_received, 0) - COALESCE(s.amt_change, 0)) < 0 THEN 0 ELSE (COALESCE(s.amt_received, 0) - COALESCE(s.amt_change, 0)) END) AS cash_total
-            FROM sales s
-            WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) BETWEEN ? AND ?
-            GROUP BY DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created))
-            ORDER BY DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created))";
-    $stmt = $mysqli->prepare($sql);
-    if ($stmt) {
-        $stmt->bind_param('ss', $startDate, $endDate);
-        if ($stmt->execute() && ($result = $stmt->get_result())) {
-            while ($row = $result->fetch_assoc()) {
-                $saleDate = isset($row['sale_date']) ? (string)$row['sale_date'] : '';
-                if ($saleDate === '') {
-                    continue;
-                }
-                $totals[$saleDate] = [
-                    'transactions' => isset($row['total_transactions']) ? (int)$row['total_transactions'] : 0,
-                    'qty' => isset($row['qty_total']) ? (float)$row['qty_total'] : 0.0,
-                    'amount' => isset($row['amount_total']) ? (float)$row['amount_total'] : 0.0,
-                    'amt_received' => isset($row['amt_received_total']) ? (float)$row['amt_received_total'] : 0.0,
-                    'amt_change' => isset($row['amt_change_total']) ? (float)$row['amt_change_total'] : 0.0,
-                    'cash' => isset($row['cash_total']) ? (float)$row['cash_total'] : 0.0,
-                    'on_account' => isset($row['on_account_total']) ? (float)$row['on_account_total'] : 0.0
-                ];
-            }
-            $result->free();
+    $orderPayments = [];
+    foreach ($rows as $index => $row) {
+        $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+        $orderKey = $orderNo !== '' ? $orderNo : '__ROW_' . $index;
+        $amount = isset($row['amount']) ? (float)$row['amount'] : 0.0;
+        $amtReceived = isset($row['amt_received']) ? (float)$row['amt_received'] : 0.0;
+        $amtChange = isset($row['amt_change']) ? (float)$row['amt_change'] : 0.0;
+
+        if (!isset($orderPayments[$orderKey])) {
+            $orderPayments[$orderKey] = [
+                'first_index' => $index,
+                'order_amount' => 0.0,
+                'amt_received' => $amtReceived,
+                'amt_change' => $amtChange,
+                'cash' => 0.0,
+                'on_account' => 0.0
+            ];
         }
-        $stmt->close();
+
+        $orderPayments[$orderKey]['order_amount'] += $amount;
+        if ($amtReceived > $orderPayments[$orderKey]['amt_received']) {
+            $orderPayments[$orderKey]['amt_received'] = $amtReceived;
+        }
+        if ($amtChange > $orderPayments[$orderKey]['amt_change']) {
+            $orderPayments[$orderKey]['amt_change'] = $amtChange;
+        }
     }
 
+    foreach ($orderPayments as &$payment) {
+        $cash = $payment['amt_received'] - $payment['amt_change'];
+        if ($cash < 0) {
+            $cash = 0.0;
+        }
+        $payment['cash'] = $cash;
+        $payment['on_account'] = $payment['amt_received'] <= 0 ? $payment['order_amount'] : 0.0;
+    }
+    unset($payment);
+
+    foreach ($rows as $index => &$row) {
+        $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+        $orderKey = $orderNo !== '' ? $orderNo : '__ROW_' . $index;
+        $payment = $orderPayments[$orderKey];
+        $isPaymentRow = $payment['first_index'] === $index;
+        $lineAmount = isset($row['amount']) ? (float)$row['amount'] : 0.0;
+        $orderAmount = (float)$payment['order_amount'];
+        $allocationRatio = 0.0;
+        if ($orderAmount > 0) {
+            $allocationRatio = $lineAmount / $orderAmount;
+        } elseif ($isPaymentRow) {
+            $allocationRatio = 1.0;
+        }
+
+        $row['amt_received_once'] = $isPaymentRow ? (float)$payment['amt_received'] : 0.0;
+        $row['amt_change_once'] = $isPaymentRow ? (float)$payment['amt_change'] : 0.0;
+        $row['cash_once'] = $isPaymentRow ? (float)$payment['cash'] : 0.0;
+        $row['on_account_once'] = $isPaymentRow ? (float)$payment['on_account'] : 0.0;
+        $row['cash_allocated'] = (float)$payment['cash'] * $allocationRatio;
+        $row['on_account_allocated'] = (float)$payment['on_account'] * $allocationRatio;
+    }
+    unset($row);
+
+    return $rows;
+}
+
+function fetchToDateSummaryByDate($registerRows)
+{
+    $totals = [];
+    $transactionsPerDate = [];
+
+    foreach ($registerRows as $index => $row) {
+        $saleDate = trim((string)(isset($row['date']) ? $row['date'] : ''));
+        if ($saleDate === '') {
+            continue;
+        }
+
+        if (!isset($totals[$saleDate])) {
+            $totals[$saleDate] = [
+                'transactions' => 0,
+                'qty' => 0.0,
+                'amount' => 0.0,
+                'amt_received' => 0.0,
+                'amt_change' => 0.0,
+                'cash' => 0.0,
+                'on_account' => 0.0
+            ];
+            $transactionsPerDate[$saleDate] = [];
+        }
+
+        $totals[$saleDate]['qty'] += isset($row['qty']) ? (float)$row['qty'] : 0.0;
+        $totals[$saleDate]['amount'] += isset($row['amount']) ? (float)$row['amount'] : 0.0;
+        $totals[$saleDate]['amt_received'] += isset($row['amt_received_once']) ? (float)$row['amt_received_once'] : 0.0;
+        $totals[$saleDate]['amt_change'] += isset($row['amt_change_once']) ? (float)$row['amt_change_once'] : 0.0;
+        $totals[$saleDate]['cash'] += isset($row['cash_once']) ? (float)$row['cash_once'] : 0.0;
+        $totals[$saleDate]['on_account'] += isset($row['on_account_once']) ? (float)$row['on_account_once'] : 0.0;
+
+        $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+        $orderKey = $orderNo !== '' ? $orderNo : '__ROW_' . $index;
+        $transactionsPerDate[$saleDate][$orderKey] = true;
+    }
+
+    foreach ($totals as $saleDate => &$values) {
+        $values['transactions'] = isset($transactionsPerDate[$saleDate]) ? count($transactionsPerDate[$saleDate]) : 0;
+    }
+    unset($values);
+
+    ksort($totals, SORT_STRING);
     return $totals;
 }
 
@@ -243,6 +347,7 @@ function fillMissingSummaryDates($summaryByDate, $startDate, $endDate)
 }
 
 $registerRows = fetchToDateRegisterRows($mysqli, $startDate, $endDate);
+$registerRows = enrichRegisterRowsWithOrderPayments($registerRows);
 $totalSales = 0;
 $uniqueOrders = [];
 foreach ($registerRows as $row) {
@@ -257,7 +362,7 @@ $transactionCount = count($uniqueOrders);
 $dayCount = $startObject && $endObject ? $startObject->diff($endObject)->days + 1 : 1;
 $averageDailySales = $dayCount > 0 ? ($totalSales / $dayCount) : 0;
 $averageDailyTransactions = $dayCount > 0 ? ($transactionCount / $dayCount) : 0;
-$summaryByDate = fetchToDateSummaryByDate($mysqli, $startDate, $endDate);
+$summaryByDate = fetchToDateSummaryByDate($registerRows);
 $summaryByDate = fillMissingSummaryDates($summaryByDate, $startDate, $endDate);
 
 $rangeLabel = formatRangeLabel($startDate, $endDate);
@@ -267,7 +372,13 @@ $spreadsheet = new Spreadsheet();
 $sheet = $spreadsheet->getActiveSheet();
 $sheet->setTitle('Daily Sales Register');
 
-$sheet->setCellValue('A1', $reportType === 'by_product' ? 'DAILY SALES REGISTER (BY PRODUCT)' : 'DAILY SALES REGISTER');
+$sheetTitle = 'DAILY SALES REGISTER';
+if ($reportType === 'by_product') {
+    $sheetTitle = 'DAILY SALES REGISTER (BY PRODUCT)';
+} elseif ($reportType === 'by_customer') {
+    $sheetTitle = 'DAILY SALES REGISTER (BY CUSTOMER)';
+}
+$sheet->setCellValue('A1', $sheetTitle);
 $sheet->getStyle('A1')->getFont()->setBold(true)->setSize(14);
 $sheet->setCellValue('A2', $reportRangeLabel);
 $sheet->setCellValue('A3', 'Generated: ' . $generatedAt);
@@ -366,8 +477,8 @@ if ($reportType === 'by_product') {
 
         $qty = isset($row['qty']) ? (float)$row['qty'] : 0;
         $amount = isset($row['amount']) ? (float)$row['amount'] : 0;
-        $cash = isset($row['cash']) ? (float)$row['cash'] : 0;
-        $onAccount = isset($row['on_account']) ? (float)$row['on_account'] : 0;
+        $cash = isset($row['cash_allocated']) ? (float)$row['cash_allocated'] : 0.0;
+        $onAccount = isset($row['on_account_allocated']) ? (float)$row['on_account_allocated'] : 0.0;
         $groupedRows[$groupLabel]['items'][$itemKey]['qty'] += $qty;
         $groupedRows[$groupLabel]['items'][$itemKey]['amount'] += $amount;
         $groupedRows[$groupLabel]['items'][$itemKey]['cash'] += $cash;
@@ -473,6 +584,150 @@ if ($reportType === 'by_product') {
     $sheet->getColumnDimension('G')->setAutoSize(false)->setWidth(16);
     $sheet->getColumnDimension('H')->setAutoSize(false)->setWidth(16);
     $sheet->getColumnDimension('I')->setAutoSize(false)->setWidth(16);
+} elseif ($reportType === 'by_customer') {
+    $headers = [
+        'NO.',
+        'CUSTOMER CODE',
+        'CUSTOMER NAME',
+        'TRANSACTION COUNT',
+        'QUANTITY',
+        'AMOUNT',
+        'CASH',
+        'ON ACCOUNT'
+    ];
+
+    $groupedRows = [];
+    foreach ($registerRows as $row) {
+        $customerCode = trim((string)(isset($row['customer_code']) ? $row['customer_code'] : ''));
+        if ($customerCode === '') {
+            $customerCode = 'UNASSIGNED';
+        }
+        $customerName = trim((string)(isset($row['customer_name']) ? $row['customer_name'] : ''));
+        if ($customerName === '' && $customerCode !== 'UNASSIGNED') {
+            $customerName = $customerCode;
+        }
+
+        if (!isset($groupedRows[$customerCode])) {
+            $groupedRows[$customerCode] = [
+                'customer_code' => $customerCode,
+                'customer_name' => $customerName,
+                'transaction_orders' => [],
+                'qty' => 0.0,
+                'amount' => 0.0,
+                'cash' => 0.0,
+                'on_account' => 0.0
+            ];
+        }
+
+        if ($groupedRows[$customerCode]['customer_name'] === '' && $customerName !== '') {
+            $groupedRows[$customerCode]['customer_name'] = $customerName;
+        }
+
+        $orderNo = trim((string)(isset($row['order_no']) ? $row['order_no'] : ''));
+        if ($orderNo !== '') {
+            $groupedRows[$customerCode]['transaction_orders'][$orderNo] = true;
+        }
+
+        $qty = isset($row['qty']) ? (float)$row['qty'] : 0;
+        $amount = isset($row['amount']) ? (float)$row['amount'] : 0;
+        $cash = isset($row['cash_once']) ? (float)$row['cash_once'] : 0.0;
+        $onAccount = isset($row['on_account_once']) ? (float)$row['on_account_once'] : 0.0;
+
+        $groupedRows[$customerCode]['qty'] += $qty;
+        $groupedRows[$customerCode]['amount'] += $amount;
+        $groupedRows[$customerCode]['cash'] += $cash;
+        $groupedRows[$customerCode]['on_account'] += $onAccount;
+    }
+
+    foreach ($groupedRows as &$groupData) {
+        $groupData['transaction_count'] = count($groupData['transaction_orders']);
+        unset($groupData['transaction_orders']);
+    }
+    unset($groupData);
+
+    if (!empty($groupedRows)) {
+        uasort($groupedRows, function ($left, $right) {
+            $codeCompare = strcasecmp((string)$left['customer_code'], (string)$right['customer_code']);
+            if ($codeCompare !== 0) {
+                return $codeCompare;
+            }
+
+            return strcasecmp((string)$left['customer_name'], (string)$right['customer_name']);
+        });
+    }
+
+    $sheet->fromArray($headers, null, 'A' . $headerRow);
+    $sheet->getStyle("A{$headerRow}:H{$headerRow}")->applyFromArray($headerStyle);
+    $sheet->getStyle("A{$headerRow}:H{$headerRow}")
+        ->getAlignment()
+        ->setWrapText(true)
+        ->setHorizontal(Alignment::HORIZONTAL_CENTER)
+        ->setVertical(Alignment::VERTICAL_CENTER);
+    $sheet->getStyle("A{$headerRow}:H{$headerRow}")->getFont()->getColor()->setRGB('000000');
+
+    $currentRow = $dataRow;
+    $lineNumber = 1;
+    $grandTotalTransactions = 0;
+    $grandTotalQty = 0.0;
+    $grandTotalAmount = 0.0;
+    $grandTotalCash = 0.0;
+    $grandTotalOnAccount = 0.0;
+
+    foreach ($groupedRows as $row) {
+        $transactionCountPerCustomer = isset($row['transaction_count']) ? (int)$row['transaction_count'] : 0;
+        $sheet->setCellValue("A{$currentRow}", $lineNumber);
+        $sheet->setCellValueExplicit("B{$currentRow}", (string)$row['customer_code'], DataType::TYPE_STRING);
+        $sheet->setCellValue("C{$currentRow}", (string)$row['customer_name']);
+        $sheet->setCellValue("D{$currentRow}", $transactionCountPerCustomer);
+        $sheet->setCellValue("E{$currentRow}", (float)$row['qty']);
+        $sheet->setCellValue("F{$currentRow}", (float)$row['amount']);
+        $sheet->setCellValue("G{$currentRow}", (float)$row['cash']);
+        $sheet->setCellValue("H{$currentRow}", (float)$row['on_account']);
+        $currentRow++;
+        $lineNumber++;
+
+        $grandTotalTransactions += $transactionCountPerCustomer;
+        $grandTotalQty += isset($row['qty']) ? (float)$row['qty'] : 0.0;
+        $grandTotalAmount += isset($row['amount']) ? (float)$row['amount'] : 0.0;
+        $grandTotalCash += isset($row['cash']) ? (float)$row['cash'] : 0.0;
+        $grandTotalOnAccount += isset($row['on_account']) ? (float)$row['on_account'] : 0.0;
+    }
+
+    $totalRow = $currentRow;
+    $sheet->setCellValue("C{$totalRow}", 'TOTAL');
+    $sheet->setCellValue("D{$totalRow}", $grandTotalTransactions);
+    $sheet->setCellValue("E{$totalRow}", $grandTotalQty);
+    $sheet->setCellValue("F{$totalRow}", $grandTotalAmount);
+    $sheet->setCellValue("G{$totalRow}", $grandTotalCash);
+    $sheet->setCellValue("H{$totalRow}", $grandTotalOnAccount);
+    $sheet->getStyle("A{$totalRow}:H{$totalRow}")->getFont()->setBold(true);
+
+    $lastDataRow = $totalRow;
+    if ($lastDataRow >= $headerRow) {
+        $sheet->getStyle("A{$headerRow}:H{$lastDataRow}")->applyFromArray($borderStyle);
+    }
+    if ($lastDataRow >= $dataRow) {
+        $sheet->getStyle("D{$dataRow}:D{$lastDataRow}")->getNumberFormat()->setFormatCode('0');
+        $sheet->getStyle("E{$dataRow}:E{$lastDataRow}")->getNumberFormat()->setFormatCode('#,##0.00');
+        $sheet->getStyle("F{$dataRow}:H{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+    }
+    $sheet->getStyle("A{$headerRow}:D{$lastDataRow}")
+        ->getAlignment()
+        ->setHorizontal(Alignment::HORIZONTAL_CENTER)
+        ->setVertical(Alignment::VERTICAL_CENTER);
+    $sheet->getStyle("E{$headerRow}:H{$lastDataRow}")
+        ->getAlignment()
+        ->setHorizontal(Alignment::HORIZONTAL_RIGHT)
+        ->setVertical(Alignment::VERTICAL_CENTER);
+
+    $sheet->getColumnDimension('A')->setAutoSize(false)->setWidth(5);
+    $sheet->getColumnDimension('B')->setAutoSize(false)->setWidth(18);
+    $sheet->getColumnDimension('C')->setAutoSize(false)->setWidth(38);
+    $sheet->getColumnDimension('D')->setAutoSize(false)->setWidth(16);
+    $sheet->getColumnDimension('E')->setAutoSize(false)->setWidth(14);
+    $sheet->getColumnDimension('F')->setAutoSize(false)->setWidth(18);
+    $sheet->getColumnDimension('G')->setAutoSize(false)->setWidth(18);
+    $sheet->getColumnDimension('H')->setAutoSize(false)->setWidth(18);
 } else {
     $headers = [
         'NO.',
@@ -515,10 +770,10 @@ if ($reportType === 'by_product') {
         $sheet->setCellValue("H{$currentRow}", $row['product_description']);
         $sheet->setCellValue("I{$currentRow}", $row['unit_price']);
         $sheet->setCellValue("J{$currentRow}", $row['amount']);
-        $sheet->setCellValue("K{$currentRow}", $row['amt_received']);
-        $sheet->setCellValue("L{$currentRow}", $row['amt_change']);
-        $sheet->setCellValue("M{$currentRow}", "=K{$currentRow}-L{$currentRow}");
-        $sheet->setCellValue("N{$currentRow}", "=IF(K{$currentRow}=0,J{$currentRow},0)");
+        $sheet->setCellValue("K{$currentRow}", isset($row['amt_received_once']) ? (float)$row['amt_received_once'] : 0.0);
+        $sheet->setCellValue("L{$currentRow}", isset($row['amt_change_once']) ? (float)$row['amt_change_once'] : 0.0);
+        $sheet->setCellValue("M{$currentRow}", isset($row['cash_once']) ? (float)$row['cash_once'] : 0.0);
+        $sheet->setCellValue("N{$currentRow}", isset($row['on_account_once']) ? (float)$row['on_account_once'] : 0.0);
         $currentRow++;
         $lineNumber++;
     }
@@ -671,7 +926,13 @@ if (ob_get_length()) {
     ob_end_clean();
 }
 
-$filename = 'todate_daily_sales_' . $startDate . '_to_' . $endDate . ($reportType === 'by_product' ? '_by_product' : '_detailed') . '.xlsx';
+$filenameSuffix = '_detailed';
+if ($reportType === 'by_product') {
+    $filenameSuffix = '_by_product';
+} elseif ($reportType === 'by_customer') {
+    $filenameSuffix = '_by_customer';
+}
+$filename = 'todate_daily_sales_' . $startDate . '_to_' . $endDate . $filenameSuffix . '.xlsx';
 header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
 header('Content-Disposition: attachment; filename="' . $filename . '"');
 header('Cache-Control: max-age=0');
