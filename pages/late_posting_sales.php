@@ -61,6 +61,57 @@ function is_pos_duplicate_key_error($stmt, $mysqli)
     return $errorNo === 1062;
 }
 
+function normalize_pos_submission_token($token)
+{
+    $token = trim((string)$token);
+    if ($token === '' || strlen($token) > 128) {
+        return '';
+    }
+    if (!preg_match('/^[A-Za-z0-9_-]+$/', $token)) {
+        return '';
+    }
+    return $token;
+}
+
+function get_pos_submission_order_no($token)
+{
+    if (!isset($_SESSION['pos_submission_orders']) || !is_array($_SESSION['pos_submission_orders'])) {
+        return '';
+    }
+    if (!isset($_SESSION['pos_submission_orders'][$token])) {
+        return '';
+    }
+    $entry = $_SESSION['pos_submission_orders'][$token];
+    $orderNo = isset($entry['order_no']) ? trim((string)$entry['order_no']) : '';
+    return $orderNo;
+}
+
+function remember_pos_submission_order_no($token, $orderNo)
+{
+    if ($token === '' || $orderNo === '') {
+        return;
+    }
+    if (!isset($_SESSION['pos_submission_orders']) || !is_array($_SESSION['pos_submission_orders'])) {
+        $_SESSION['pos_submission_orders'] = [];
+    }
+    $_SESSION['pos_submission_orders'][$token] = [
+        'order_no' => $orderNo,
+        'saved_at' => time()
+    ];
+
+    if (count($_SESSION['pos_submission_orders']) > 250) {
+        uasort($_SESSION['pos_submission_orders'], function ($a, $b) {
+            $timeA = isset($a['saved_at']) ? (int)$a['saved_at'] : 0;
+            $timeB = isset($b['saved_at']) ? (int)$b['saved_at'] : 0;
+            if ($timeA === $timeB) {
+                return 0;
+            }
+            return ($timeA < $timeB) ? -1 : 1;
+        });
+        $_SESSION['pos_submission_orders'] = array_slice($_SESSION['pos_submission_orders'], -200, null, true);
+    }
+}
+
 if ($isPosSubmission) {
     if (!isset($mysqli) || !$mysqli) {
         send_pos_json_response(['success' => false, 'message' => 'Database connection unavailable.'], 500);
@@ -74,11 +125,15 @@ if ($isPosSubmission) {
 
     $action = trim((string)(isset($payload['action']) ? $payload['action'] : ''));
     if ($action === 'reserve_order_no') {
-        list($reservedOrderNo, $reserveError) = generate_pos_order_no($mysqli);
-        if ($reserveError) {
-            send_pos_json_response(['success' => false, 'message' => $reserveError], 500);
+        send_pos_json_response(['success' => true, 'order_no' => '']);
+    }
+
+    $submissionToken = normalize_pos_submission_token(isset($payload['submission_token']) ? $payload['submission_token'] : '');
+    if ($submissionToken !== '') {
+        $existingOrderNo = get_pos_submission_order_no($submissionToken);
+        if ($existingOrderNo !== '') {
+            send_pos_json_response(['success' => true, 'order_no' => $existingOrderNo]);
         }
-        send_pos_json_response(['success' => true, 'order_no' => $reservedOrderNo]);
     }
 
     $customerCode = trim((string)(isset($payload['customer_code']) ? $payload['customer_code'] : ''));
@@ -248,6 +303,7 @@ if ($isPosSubmission) {
 
         $mysqli->commit();
         $insertStmt->close();
+        remember_pos_submission_order_no($submissionToken, $orderNo);
         send_pos_json_response(['success' => true, 'order_no' => $orderNo]);
     }
 
@@ -453,6 +509,23 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
         top: 0;
     }
 
+    #pos-customer.pos-customer-listbox {
+        min-height: 220px;
+        max-height: 280px;
+        overflow-y: auto;
+    }
+
+    #pos-customer.pos-customer-listbox option {
+        padding: 6px 10px;
+    }
+
+    @media (max-width: 767.98px) {
+        #pos-customer.pos-customer-listbox {
+            min-height: 180px;
+            max-height: 240px;
+        }
+    }
+
     @media print {
         @page {
             size: 80mm auto;
@@ -531,7 +604,14 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                                             <label class="form-label fw-semibold mb-0">Customer:</label>
                                         </div>
                                         <div class="col-12 col-md-7 col-lg-5">
-                                            <select class="form-select" id="pos-customer" name="customer_id">
+                                            <input
+                                                type="text"
+                                                class="form-control mb-2"
+                                                id="pos-customer-filter"
+                                                placeholder="Search customer by code, name, or store"
+                                                autocomplete="off"
+                                                <?php echo ($customerError || empty($customers)) ? 'disabled' : ''; ?>>
+                                            <select class="form-select pos-customer-listbox" id="pos-customer" name="customer_id" size="8" aria-label="Customer list">
                                                 <option selected disabled>Select Customer</option>
                                                 <?php if ($customerError): ?>
                                                     <option disabled><?php echo htmlspecialchars($customerError, ENT_QUOTES, 'UTF-8'); ?></option>
@@ -832,8 +912,16 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                 }
 
                 var customerSelect = document.getElementById('pos-customer');
+                var customerFilterInput = document.getElementById('pos-customer-filter');
                 var storeNameInput = document.getElementById('pos-store-name');
                 var storeAddressInput = document.getElementById('pos-store-address');
+
+                function normalizeFilterText(value) {
+                    return String(value || '')
+                        .toLowerCase()
+                        .replace(/\s+/g, ' ')
+                        .trim();
+                }
 
                 function isCustomerSelected() {
                     if (!customerSelect) {
@@ -858,6 +946,17 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                     }
                     if (storeAddressInput) {
                         storeAddressInput.value = address;
+                    }
+                }
+
+                function syncCustomerFilterWithSelection() {
+                    if (!customerSelect || !customerFilterInput) {
+                        return;
+                    }
+
+                    var option = customerSelect.options[customerSelect.selectedIndex];
+                    if (option && option.value) {
+                        customerFilterInput.value = (option.textContent || '').trim();
                     }
                 }
 
@@ -902,6 +1001,49 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                     updateSubmitEnabled();
                 }
 
+                function applyCustomerFilter() {
+                    if (!customerSelect) {
+                        return;
+                    }
+
+                    var filterText = normalizeFilterText(customerFilterInput ? customerFilterInput.value : '');
+                    var selectedOption = customerSelect.options[customerSelect.selectedIndex];
+                    var selectedStillVisible = false;
+
+                    for (var i = 0; i < customerSelect.options.length; i++) {
+                        var option = customerSelect.options[i];
+                        if (!option || !option.value) {
+                            if (option) {
+                                option.hidden = filterText !== '';
+                            }
+                            continue;
+                        }
+
+                        var searchSource = normalizeFilterText(
+                            (option.textContent || '')
+                            + ' '
+                            + (option.dataset && option.dataset.code ? option.dataset.code : '')
+                            + ' '
+                            + (option.dataset && option.dataset.store ? option.dataset.store : '')
+                            + ' '
+                            + (option.dataset && option.dataset.address ? option.dataset.address : '')
+                        );
+                        var isMatch = filterText === '' || searchSource.indexOf(filterText) !== -1;
+                        option.hidden = !isMatch;
+
+                        if (option === selectedOption && isMatch) {
+                            selectedStillVisible = true;
+                        }
+                    }
+
+                    if (!selectedStillVisible && customerSelect.options.length > 0) {
+                        customerSelect.selectedIndex = 0;
+                    }
+
+                    updateCustomerDetails();
+                    setCustomerDependentEnabled(isCustomerSelected());
+                }
+
                 orderOptions.forEach(function (option) {
                     option.addEventListener('change', function () {
                         if (this.checked) {
@@ -944,21 +1086,42 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                 var previewPrintCustomerButton = document.getElementById('pos-preview-print-customer');
                 var printArea = document.getElementById('pos-print-area');
                 var previewBusy = false;
-                var reservedOrderNo = '';
-                var reservingOrderNo = false;
                 var savedOrderNo = '';
                 var savedPrintedAt = '';
                 var orderSaved = false;
                 var savedPaymentSummary = null;
+                var savedOrderSignature = '';
+                var currentSubmissionToken = createSubmissionToken();
 
                 if (customerSelect) {
                     customerSelect.addEventListener('change', function () {
+                        syncCustomerFilterWithSelection();
                         updateCustomerDetails();
                         setCustomerDependentEnabled(isCustomerSelected());
                     });
                 }
 
+                if (customerFilterInput) {
+                    customerFilterInput.addEventListener('input', applyCustomerFilter);
+                    customerFilterInput.addEventListener('keydown', function (event) {
+                        if (event.key !== 'Enter' || !customerSelect) {
+                            return;
+                        }
+
+                        for (var i = 0; i < customerSelect.options.length; i++) {
+                            var option = customerSelect.options[i];
+                            if (option && option.value && !option.hidden) {
+                                customerSelect.value = option.value;
+                                customerSelect.dispatchEvent(new Event('change'));
+                                event.preventDefault();
+                                break;
+                            }
+                        }
+                    });
+                }
+
                 updateDeliveryVisibility();
+                applyCustomerFilter();
                 updateCustomerDetails();
                 setCustomerDependentEnabled(isCustomerSelected());
 
@@ -1008,6 +1171,81 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                         amountReceived: amountReceived,
                         change: change
                     };
+                }
+
+                function toSignatureNumber(value) {
+                    var numericValue = Number(value);
+                    if (Number.isNaN(numericValue)) {
+                        return 0;
+                    }
+                    return Number(numericValue.toFixed(4));
+                }
+
+                function createSubmissionToken() {
+                    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+                        return window.crypto.randomUUID();
+                    }
+                    return 'tok-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12);
+                }
+
+                function buildCurrentOrderSignature(paymentSummary) {
+                    var payment = paymentSummary || getPaymentSummary(calculateReceiptTotals());
+                    var discountValue = discountInput ? parseFloat(discountInput.value || '0') : 0;
+                    if (Number.isNaN(discountValue) || discountValue < 0) {
+                        discountValue = 0;
+                    }
+                    if (discountValue > 100) {
+                        discountValue = 100;
+                    }
+
+                    var signatureItems = (lineItems || []).map(function (item) {
+                        return {
+                            code: String(item.code || ''),
+                            description: String(item.description || ''),
+                            uom: String(item.uom || ''),
+                            qty: toSignatureNumber(item.qty || 0),
+                            unit_price: toSignatureNumber(item.unitPrice || 0),
+                            lineitem_discount: toSignatureNumber(item.lineDiscount || 0),
+                            amount: toSignatureNumber(item.amount || 0)
+                        };
+                    });
+
+                    return JSON.stringify({
+                        customer_code: getCustomerCode(),
+                        order_type: getOrderType(),
+                        delivery_instruction: deliveryInstructionInput ? deliveryInstructionInput.value.trim() : '',
+                        date_delivery: dateDeliveryInput ? dateDeliveryInput.value : '',
+                        time_delivery: timeDeliveryInput ? timeDeliveryInput.value : '',
+                        date_time_ordered: getOrderedAtValue(),
+                        discount: toSignatureNumber(discountValue),
+                        payment: {
+                            amount_due: toSignatureNumber(payment.amountDue),
+                            amount_received: toSignatureNumber(payment.amountReceived),
+                            change: toSignatureNumber(payment.change)
+                        },
+                        items: signatureItems
+                    });
+                }
+
+                function clearSavedOrderState() {
+                    savedOrderNo = '';
+                    savedPrintedAt = '';
+                    orderSaved = false;
+                    savedPaymentSummary = null;
+                    savedOrderSignature = '';
+                    currentSubmissionToken = createSubmissionToken();
+                }
+
+                function syncSavedOrderStateWithCurrentForm() {
+                    if (!orderSaved) {
+                        return;
+                    }
+
+                    var currentPaymentSummary = getPaymentSummary(calculateReceiptTotals());
+                    var currentSignature = buildCurrentOrderSignature(currentPaymentSummary);
+                    if (!savedOrderSignature || savedOrderSignature !== currentSignature) {
+                        clearSavedOrderState();
+                    }
                 }
 
                 function escapeHtml(value) {
@@ -1316,59 +1554,21 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                     }
                 }
 
-                function requestReservedOrderNo() {
-                    if (reservingOrderNo || reservedOrderNo) {
-                        if (reservedOrderNo) {
-                            renderReceiptCopies(reservedOrderNo, getOrderedAtValue());
-                        }
-                        return;
-                    }
-
-                    reservingOrderNo = true;
-                    fetch(window.location.href, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({ action: 'reserve_order_no' })
-                    })
-                        .then(function (response) {
-                            return response.json().then(function (data) {
-                                return {
-                                    ok: response.ok,
-                                    data: data
-                                };
-                            });
-                        })
-                        .then(function (result) {
-                            if (!result.ok || !result.data || !result.data.success) {
-                                var message = result.data && result.data.message ? result.data.message : 'Unable to reserve order number.';
-                                throw new Error(message);
-                            }
-                            reservedOrderNo = result.data.order_no || '';
-                            if (reservedOrderNo) {
-                                renderReceiptCopies(reservedOrderNo, getOrderedAtValue());
-                            }
-                        })
-                        .catch(function (error) {
-                            window.alert(error && error.message ? error.message : 'Unable to reserve order number.');
-                        })
-                        .then(function () {
-                            reservingOrderNo = false;
-                        });
-                }
-
                 function openPreviewModal() {
                     if (!previewModal) {
                         return;
                     }
-                    var orderedAtText = getOrderedAtValue();
-                    renderReceiptCopies(reservedOrderNo, orderedAtText, savedPaymentSummary);
+                    syncSavedOrderStateWithCurrentForm();
+                    if (orderSaved) {
+                        renderReceiptCopies(savedOrderNo, savedPrintedAt, savedPaymentSummary);
+                    } else {
+                        var orderedAtText = getOrderedAtValue();
+                        renderReceiptCopies('', orderedAtText);
+                    }
                     previewModal.classList.remove('d-none');
                     previewModal.setAttribute('aria-hidden', 'false');
                     document.body.classList.add('pos-modal-open');
                     updatePrintButtons();
-                    requestReservedOrderNo();
                 }
 
                 function closePreviewModal(forceClose) {
@@ -1660,6 +1860,7 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
 
                     return {
                         order_no: orderNo || '',
+                        submission_token: currentSubmissionToken || '',
                         customer_id: customerSelect ? customerSelect.value : '',
                         customer_code: getCustomerCode(),
                         order_type: getOrderType(),
@@ -1685,12 +1886,8 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
 
                 function resetOrderForm() {
                     lineItems = [];
-                    reservedOrderNo = '';
-                    savedOrderNo = '';
-                    savedPrintedAt = '';
-                    orderSaved = false;
+                    clearSavedOrderState();
                     previewBusy = false;
-                    savedPaymentSummary = null;
                     if (amountReceivedInput) {
                         amountReceivedInput.value = '0';
                     }
@@ -1776,6 +1973,7 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                             return;
                         }
 
+                        syncSavedOrderStateWithCurrentForm();
                         if (orderSaved) {
                             previewBusy = true;
                             updatePrintButtons();
@@ -1795,7 +1993,7 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                         var printedAtText = formatTimestamp(new Date());
                         var totals = calculateReceiptTotals();
                         var paymentSummary = getPaymentSummary(totals);
-                        var payload = buildOrderPayload(printedAtText, reservedOrderNo, paymentSummary, orderedAtText);
+                        var payload = buildOrderPayload(printedAtText, '', paymentSummary, orderedAtText);
 
                         previewBusy = true;
                         updatePrintButtons();
@@ -1821,10 +2019,11 @@ $query = "SELECT id, customer_code, firstName, middleName, lastName, storeName, 
                                     throw new Error(message);
                                 }
 
-                                savedOrderNo = result.data.order_no || reservedOrderNo;
+                                savedOrderNo = result.data.order_no || '';
                                 savedPrintedAt = orderedAtText;
                                 savedPaymentSummary = paymentSummary;
                                 orderSaved = true;
+                                savedOrderSignature = buildCurrentOrderSignature(savedPaymentSummary);
                                 renderReceiptCopies(savedOrderNo, savedPrintedAt, savedPaymentSummary);
                                 renderPrintCopy('STORE COPY', savedOrderNo, savedPrintedAt, savedPaymentSummary);
                                 window.print();

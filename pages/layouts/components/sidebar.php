@@ -137,6 +137,9 @@
                                     <li class="slide">
                                         <a href="todate_daily_sales.php" class="side-menu__item">To-Date Daily Sales</a>
                                     </li>
+                                    <li class="slide">
+                                        <a href="todate_daily_sales_summary.php" class="side-menu__item">To-Date Sales Summary</a>
+                                    </li>
                                     <li class="slide has-sub">
                                         <a href="javascript:void(0);" class="side-menu__item">
                                             <span class="side-menu__label">Production</span>

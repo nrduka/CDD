@@ -28,7 +28,7 @@ $today = date('Y-m-d');
 $startInput = isset($_GET['start']) ? trim((string)$_GET['start']) : '';
 $endInput = isset($_GET['end']) ? trim((string)$_GET['end']) : '';
 $reportTypeInput = isset($_GET['report_type']) ? trim((string)$_GET['report_type']) : '';
-$reportType = in_array($reportTypeInput, ['detailed', 'by_product', 'by_customer'], true) ? $reportTypeInput : 'detailed';
+$reportType = in_array($reportTypeInput, ['detailed'], true) ? $reportTypeInput : 'detailed';
 
 $startDate = $startInput !== '' ? $startInput : $today;
 $endDate = $endInput !== '' ? $endInput : $today;
@@ -121,13 +121,18 @@ function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
                    s.date_time_ordered,
                    s.amt_received,
                    s.amt_change,
+                   p.product_type AS master_product_type,
+                   p.product_description AS master_product_description,
+                   p.uom,
                    c.storeName,
                    c.firstName,
                    c.middleName,
                    c.lastName
              FROM sales s
+             LEFT JOIN ice_product p ON p.product_code = s.product_code
              LEFT JOIN customer_register c ON c.customer_code = s.customer_code
              WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) BETWEEN ? AND ?
+              AND (s.void_status IS NULL OR s.void_status = 0)
              ORDER BY COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created), s.order_no, s.lineitem";
 
     $stmt = $mysqli->prepare($sql);
@@ -141,6 +146,17 @@ function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
                 );
                 $dateLabel = $orderedAt ? $orderedAt->format('Y-m-d') : '';
                 $timeLabel = $orderedAt ? $orderedAt->format('H:i:s') : '';
+                $productDescription = trim((string)(isset($row['product_description']) ? $row['product_description'] : ''));
+                if ($productDescription === '') {
+                    $productDescription = trim((string)(isset($row['master_product_description']) ? $row['master_product_description'] : ''));
+                }
+                $productType = trim((string)(isset($row['master_product_type']) ? $row['master_product_type'] : ''));
+                if ($productType === '') {
+                    $productType = resolveProductTypeGroup(
+                        $productDescription,
+                        isset($row['product_code']) ? $row['product_code'] : ''
+                    );
+                }
 
                 $amount = isset($row['amount']) ? (float)$row['amount'] : 0.0;
                 $amtReceived = isset($row['amt_received']) ? (float)$row['amt_received'] : 0.0;
@@ -157,7 +173,9 @@ function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
                     'customer_name' => buildCustomerDisplayName($row),
                     'qty' => isset($row['qty']) ? (float)$row['qty'] : 0.0,
                     'product_code' => isset($row['product_code']) ? (string)$row['product_code'] : '',
-                    'product_description' => isset($row['product_description']) ? (string)$row['product_description'] : '',
+                    'product_description' => $productDescription,
+                    'product_type' => $productType,
+                    'uom' => trim((string)(isset($row['uom']) ? $row['uom'] : '')),
                     'unit_price' => isset($row['unit_price']) ? (float)$row['unit_price'] : 0.0,
                     'amount' => $amount,
                     'amt_received' => $amtReceived,
@@ -311,6 +329,113 @@ function resolveProductTypeGroup($productDescription, $productCode)
     return 'UNCLASSIFIED';
 }
 
+function columnIndexToLetter($columnIndex)
+{
+    $index = (int)$columnIndex;
+    if ($index <= 0) {
+        return 'A';
+    }
+
+    $letter = '';
+    while ($index > 0) {
+        $remainder = ($index - 1) % 26;
+        $letter = chr(65 + $remainder) . $letter;
+        $index = (int)(($index - $remainder - 1) / 26);
+    }
+
+    return $letter;
+}
+
+function buildProductPivotRows($registerRows)
+{
+    $pivotByProduct = [];
+    foreach ($registerRows as $index => $row) {
+        $productCode = trim((string)(isset($row['product_code']) ? $row['product_code'] : ''));
+        $productDescription = trim((string)(isset($row['product_description']) ? $row['product_description'] : ''));
+        $productType = trim((string)(isset($row['product_type']) ? $row['product_type'] : ''));
+        $uom = trim((string)(isset($row['uom']) ? $row['uom'] : ''));
+        $qty = isset($row['qty']) ? (float)$row['qty'] : 0.0;
+
+        if ($productType === '') {
+            $productType = resolveProductTypeGroup($productDescription, $productCode);
+        }
+
+        $key = $productCode !== '' ? strtoupper($productCode) : '__NO_CODE_' . $index;
+        if (!isset($pivotByProduct[$key])) {
+            $pivotByProduct[$key] = [
+                'product_type' => $productType,
+                'product_code' => $productCode,
+                'product_description' => $productDescription,
+                'qty' => 0.0,
+                'uom' => $uom
+            ];
+        }
+
+        $pivotByProduct[$key]['qty'] += $qty;
+        if ($pivotByProduct[$key]['product_type'] === '' && $productType !== '') {
+            $pivotByProduct[$key]['product_type'] = $productType;
+        }
+        if ($pivotByProduct[$key]['product_description'] === '' && $productDescription !== '') {
+            $pivotByProduct[$key]['product_description'] = $productDescription;
+        }
+        if ($pivotByProduct[$key]['uom'] === '' && $uom !== '') {
+            $pivotByProduct[$key]['uom'] = $uom;
+        }
+    }
+
+    $pivotRows = array_values($pivotByProduct);
+    usort($pivotRows, function ($left, $right) {
+        $leftType = strtoupper(trim((string)$left['product_type']));
+        $rightType = strtoupper(trim((string)$right['product_type']));
+        if ($leftType !== $rightType) {
+            return strcmp($leftType, $rightType);
+        }
+
+        $leftCode = strtoupper(trim((string)$left['product_code']));
+        $rightCode = strtoupper(trim((string)$right['product_code']));
+        if ($leftCode !== $rightCode) {
+            return strcmp($leftCode, $rightCode);
+        }
+
+        return strcmp(
+            strtoupper(trim((string)$left['product_description'])),
+            strtoupper(trim((string)$right['product_description']))
+        );
+    });
+
+    return $pivotRows;
+}
+
+function buildProductPivotByDate($registerRows)
+{
+    $pivotByDate = [];
+
+    foreach ($registerRows as $row) {
+        $saleDate = trim((string)(isset($row['date']) ? $row['date'] : ''));
+        $productCode = strtoupper(trim((string)(isset($row['product_code']) ? $row['product_code'] : '')));
+        if ($saleDate === '' || $productCode === '') {
+            continue;
+        }
+
+        if (!isset($pivotByDate[$saleDate])) {
+            $pivotByDate[$saleDate] = [];
+        }
+        if (!isset($pivotByDate[$saleDate][$productCode])) {
+            $pivotByDate[$saleDate][$productCode] = [
+                'qty' => 0.0,
+                'uom' => trim((string)(isset($row['uom']) ? $row['uom'] : ''))
+            ];
+        }
+
+        $pivotByDate[$saleDate][$productCode]['qty'] += isset($row['qty']) ? (float)$row['qty'] : 0.0;
+        if ($pivotByDate[$saleDate][$productCode]['uom'] === '') {
+            $pivotByDate[$saleDate][$productCode]['uom'] = trim((string)(isset($row['uom']) ? $row['uom'] : ''));
+        }
+    }
+
+    return $pivotByDate;
+}
+
 function formatRangeLabel($startDate, $endDate)
 {
     $startLabel = date('F d, Y', strtotime($startDate));
@@ -348,6 +473,8 @@ function fillMissingSummaryDates($summaryByDate, $startDate, $endDate)
 
 $registerRows = fetchToDateRegisterRows($mysqli, $startDate, $endDate);
 $registerRows = enrichRegisterRowsWithOrderPayments($registerRows);
+$productPivotRows = buildProductPivotRows($registerRows);
+$productPivotByDate = buildProductPivotByDate($registerRows);
 $totalSales = 0;
 $uniqueOrders = [];
 foreach ($registerRows as $row) {
@@ -735,6 +862,7 @@ if ($reportType === 'by_product') {
         'TIME',
         'DR NO.',
         'CUSTOMER CODE',
+        'CUSTOMER NAME',
         'QUANTITY',
         'PRODUCT CODE',
         'PRODUCT DESCRIPTION',
@@ -747,81 +875,95 @@ if ($reportType === 'by_product') {
     ];
 
     $sheet->fromArray($headers, null, 'A' . $headerRow);
-    $sheet->getStyle("A{$headerRow}:N{$headerRow}")->applyFromArray($headerStyle);
-    $sheet->getStyle("A{$headerRow}:N{$headerRow}")
+    $sheet->getStyle("A{$headerRow}:O{$headerRow}")->applyFromArray($headerStyle);
+    $sheet->getStyle("A{$headerRow}:O{$headerRow}")
         ->getAlignment()
         ->setWrapText(true)
         ->setHorizontal(Alignment::HORIZONTAL_CENTER)
         ->setVertical(Alignment::VERTICAL_CENTER);
-    $sheet->getStyle("A{$headerRow}:N{$headerRow}")->getFont()->getColor()->setRGB('000000');
+    $sheet->getStyle("A{$headerRow}:O{$headerRow}")->getFont()->getColor()->setRGB('000000');
 
     $currentRow = $dataRow;
-    $lineNumber = 1;
-    foreach ($registerRows as $row) {
+    $transactionSequence = 0;
+    $transactionNumberByOrder = [];
+    $transactionRenderedByOrder = [];
+    foreach ($registerRows as $index => $row) {
         $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+        $transactionKey = $orderNo !== '' ? $orderNo : '__ROW_' . $index;
+        if (!isset($transactionNumberByOrder[$transactionKey])) {
+            $transactionSequence++;
+            $transactionNumberByOrder[$transactionKey] = $transactionSequence;
+        }
+        $showTransactionNumber = !isset($transactionRenderedByOrder[$transactionKey]);
+        $transactionRenderedByOrder[$transactionKey] = true;
         $orderNoDisplay = $orderNo !== '' ? 'DR' . $orderNo : '';
-        $sheet->setCellValue("A{$currentRow}", $lineNumber);
+        $sheet->setCellValue("A{$currentRow}", $showTransactionNumber ? $transactionNumberByOrder[$transactionKey] : '');
         $sheet->setCellValueExplicit("B{$currentRow}", $row['date'], DataType::TYPE_STRING);
         $sheet->setCellValueExplicit("C{$currentRow}", $row['time'], DataType::TYPE_STRING);
         $sheet->setCellValueExplicit("D{$currentRow}", $orderNoDisplay, DataType::TYPE_STRING);
         $sheet->setCellValueExplicit("E{$currentRow}", $row['customer_code'], DataType::TYPE_STRING);
-        $sheet->setCellValue("F{$currentRow}", $row['qty']);
-        $sheet->setCellValueExplicit("G{$currentRow}", $row['product_code'], DataType::TYPE_STRING);
-        $sheet->setCellValue("H{$currentRow}", $row['product_description']);
-        $sheet->setCellValue("I{$currentRow}", $row['unit_price']);
-        $sheet->setCellValue("J{$currentRow}", $row['amount']);
-        $sheet->setCellValue("K{$currentRow}", isset($row['amt_received_once']) ? (float)$row['amt_received_once'] : 0.0);
-        $sheet->setCellValue("L{$currentRow}", isset($row['amt_change_once']) ? (float)$row['amt_change_once'] : 0.0);
-        $sheet->setCellValue("M{$currentRow}", isset($row['cash_once']) ? (float)$row['cash_once'] : 0.0);
-        $sheet->setCellValue("N{$currentRow}", isset($row['on_account_once']) ? (float)$row['on_account_once'] : 0.0);
+        $sheet->setCellValue("F{$currentRow}", isset($row['customer_name']) ? (string)$row['customer_name'] : '');
+        $sheet->setCellValue("G{$currentRow}", $row['qty']);
+        $sheet->setCellValueExplicit("H{$currentRow}", $row['product_code'], DataType::TYPE_STRING);
+        $sheet->setCellValue("I{$currentRow}", $row['product_description']);
+        $sheet->setCellValue("J{$currentRow}", $row['unit_price']);
+        $sheet->setCellValue("K{$currentRow}", $row['amount']);
+        $sheet->setCellValue("L{$currentRow}", isset($row['amt_received_once']) ? (float)$row['amt_received_once'] : 0.0);
+        $sheet->setCellValue("M{$currentRow}", isset($row['amt_change_once']) ? (float)$row['amt_change_once'] : 0.0);
+        $sheet->setCellValue("N{$currentRow}", isset($row['cash_once']) ? (float)$row['cash_once'] : 0.0);
+        $sheet->setCellValue("O{$currentRow}", isset($row['on_account_once']) ? (float)$row['on_account_once'] : 0.0);
+
         $currentRow++;
-        $lineNumber++;
     }
 
     $lastDetailRow = $currentRow - 1;
     $totalRow = $currentRow;
-    $sheet->setCellValue("H{$totalRow}", 'TOTAL');
-    $sheet->getStyle("A{$totalRow}:N{$totalRow}")->getFont()->setBold(true);
+    $sheet->setCellValue("I{$totalRow}", 'TOTAL');
+    $sheet->getStyle("A{$totalRow}:O{$totalRow}")->getFont()->setBold(true);
     if ($lastDetailRow >= $dataRow) {
-        $sheet->setCellValue("J{$totalRow}", "=SUM(J{$dataRow}:J{$lastDetailRow})");
         $sheet->setCellValue("K{$totalRow}", "=SUM(K{$dataRow}:K{$lastDetailRow})");
         $sheet->setCellValue("L{$totalRow}", "=SUM(L{$dataRow}:L{$lastDetailRow})");
         $sheet->setCellValue("M{$totalRow}", "=SUM(M{$dataRow}:M{$lastDetailRow})");
         $sheet->setCellValue("N{$totalRow}", "=SUM(N{$dataRow}:N{$lastDetailRow})");
+        $sheet->setCellValue("O{$totalRow}", "=SUM(O{$dataRow}:O{$lastDetailRow})");
     } else {
-        $sheet->setCellValue("J{$totalRow}", 0);
         $sheet->setCellValue("K{$totalRow}", 0);
         $sheet->setCellValue("L{$totalRow}", 0);
         $sheet->setCellValue("M{$totalRow}", 0);
         $sheet->setCellValue("N{$totalRow}", 0);
+        $sheet->setCellValue("O{$totalRow}", 0);
     }
 
     $lastDataRow = $totalRow;
     if ($lastDataRow >= $headerRow) {
-        $sheet->getStyle("A{$headerRow}:N{$lastDataRow}")->applyFromArray($borderStyle);
+        $sheet->getStyle("A{$headerRow}:O{$lastDataRow}")->applyFromArray($borderStyle);
     }
     if ($lastDataRow >= $dataRow) {
-        $sheet->getStyle("F{$dataRow}:F{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-        $sheet->getStyle("I{$dataRow}:N{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+        $sheet->getStyle("G{$dataRow}:G{$lastDataRow}")->getNumberFormat()->setFormatCode('#,##0.00');
+        $sheet->getStyle("J{$dataRow}:O{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
     }
-    $sheet->getStyle("B{$headerRow}:G{$lastDataRow}")
+    $sheet->getStyle("B{$headerRow}:H{$lastDataRow}")
         ->getAlignment()
         ->setHorizontal(Alignment::HORIZONTAL_CENTER)
         ->setVertical(Alignment::VERTICAL_CENTER);
 
-    foreach (range('A', 'N') as $column) {
-        if (in_array($column, ['B', 'C', 'D', 'E', 'F', 'G'], true)) {
+    foreach (range('A', 'O') as $column) {
+        if (in_array($column, ['B', 'C', 'D', 'E', 'G', 'H'], true)) {
             $sheet->getColumnDimension($column)->setAutoSize(false)->setWidth(15);
             continue;
         }
-        if (in_array($column, ['I', 'J', 'K', 'L', 'M', 'N'], true)) {
+        if ($column === 'F') {
+            $sheet->getColumnDimension($column)->setAutoSize(false)->setWidth(26);
+            continue;
+        }
+        if (in_array($column, ['J', 'K', 'L', 'M', 'N', 'O'], true)) {
             $sheet->getColumnDimension($column)->setAutoSize(false)->setWidth(20);
             continue;
         }
         $sheet->getColumnDimension($column)->setAutoSize(true);
     }
     $sheet->getColumnDimension('A')->setAutoSize(false)->setWidth(5);
-    $sheet->getColumnDimension('H')->setAutoSize(false)->setWidth(40);
+    $sheet->getColumnDimension('I')->setAutoSize(false)->setWidth(40);
 }
 
 $summarySheet = $spreadsheet->createSheet();
@@ -833,7 +975,7 @@ $summarySheet->setCellValue('A2', 'Date Range: ' . $rangeLabel);
 $summarySheet->setCellValue('A3', 'Generated: ' . $generatedAt);
 
 $summaryHeaderRow = 8;
-$summaryDataRow = 9;
+$summaryDataRow = $reportType === 'by_product' ? 10 : 9;
 $summaryHeaders = [
     'NO.',
     'DATE',
@@ -888,6 +1030,7 @@ foreach ($summaryByDate as $saleDate => $totals) {
     $counter++;
 }
 
+$lastSummaryDetailRow = $currentRow - 1;
 $summarySheet->setCellValue("B{$currentRow}", 'Total');
 $summarySheet->setCellValue("C{$currentRow}", $summaryTotals['transactions']);
 $summarySheet->setCellValue("D{$currentRow}", $summaryTotals['qty']);
@@ -899,6 +1042,151 @@ $summarySheet->setCellValue("I{$currentRow}", $summaryTotals['on_account']);
 $summarySheet->getStyle("A{$currentRow}:I{$currentRow}")->applyFromArray($headerStyle);
 $summarySheet->getStyle("A{$currentRow}:I{$currentRow}")->getFont()->setBold(true);
 $summarySheet->getStyle("D{$currentRow}:I{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+
+$summaryTotalRow = $currentRow;
+if ($reportType === 'by_product' && !empty($productPivotRows)) {
+    $summaryPivotHeaderRow = 6;
+    $summaryPivotCodeRow = 7;
+    $summaryPivotDescriptionRow = 8;
+    $summaryPivotSubHeaderRow = 9;
+    $summaryPivotTitleRow = 5;
+    $summaryPivotStartColumnIndex = 10; // J
+    $summaryPivotLastColumnIndex = $summaryPivotStartColumnIndex - 1;
+    $summaryProductColumnsByCode = [];
+    $summaryProductTypeGroups = [];
+    $summaryPivotHeaderFillStyle = [
+        'fill' => [
+            'fillType' => Fill::FILL_SOLID,
+            'startColor' => ['rgb' => 'fff200']
+        ]
+    ];
+
+    foreach ($productPivotRows as $pivotIndex => $pivotData) {
+        $qtyColumnIndex = $summaryPivotStartColumnIndex + ($pivotIndex * 2);
+        $uomColumnIndex = $qtyColumnIndex + 1;
+        $qtyColumnLetter = columnIndexToLetter($qtyColumnIndex);
+        $uomColumnLetter = columnIndexToLetter($uomColumnIndex);
+        $summaryPivotLastColumnIndex = $uomColumnIndex;
+
+        $productTypeLabel = isset($pivotData['product_type']) ? trim((string)$pivotData['product_type']) : '';
+        $productTypeKey = strtoupper($productTypeLabel);
+        if (empty($summaryProductTypeGroups) || $summaryProductTypeGroups[count($summaryProductTypeGroups) - 1]['key'] !== $productTypeKey) {
+            $summaryProductTypeGroups[] = [
+                'key' => $productTypeKey,
+                'label' => $productTypeLabel,
+                'start_column_index' => $qtyColumnIndex,
+                'end_column_index' => $uomColumnIndex
+            ];
+        } else {
+            $lastTypeGroupIndex = count($summaryProductTypeGroups) - 1;
+            $summaryProductTypeGroups[$lastTypeGroupIndex]['end_column_index'] = $uomColumnIndex;
+            if ($summaryProductTypeGroups[$lastTypeGroupIndex]['label'] === '' && $productTypeLabel !== '') {
+                $summaryProductTypeGroups[$lastTypeGroupIndex]['label'] = $productTypeLabel;
+            }
+        }
+
+        $summarySheet->mergeCells("{$qtyColumnLetter}{$summaryPivotCodeRow}:{$uomColumnLetter}{$summaryPivotCodeRow}");
+        $summarySheet->mergeCells("{$qtyColumnLetter}{$summaryPivotDescriptionRow}:{$uomColumnLetter}{$summaryPivotDescriptionRow}");
+        $summarySheet->setCellValue("{$qtyColumnLetter}{$summaryPivotCodeRow}", isset($pivotData['product_code']) ? (string)$pivotData['product_code'] : '');
+        $summarySheet->setCellValue("{$qtyColumnLetter}{$summaryPivotDescriptionRow}", isset($pivotData['product_description']) ? (string)$pivotData['product_description'] : '');
+        $summarySheet->setCellValue("{$qtyColumnLetter}{$summaryPivotSubHeaderRow}", 'QTY');
+        $summarySheet->setCellValue("{$uomColumnLetter}{$summaryPivotSubHeaderRow}", 'UOM');
+
+        $summarySheet->getStyle("{$qtyColumnLetter}{$summaryPivotHeaderRow}:{$uomColumnLetter}{$summaryPivotSubHeaderRow}")
+            ->applyFromArray($summaryPivotHeaderFillStyle);
+        $summarySheet->getStyle("{$qtyColumnLetter}{$summaryPivotHeaderRow}:{$uomColumnLetter}{$summaryPivotSubHeaderRow}")
+            ->getFont()
+            ->setBold(true)
+            ->getColor()
+            ->setRGB('ff0000');
+        $summarySheet->getStyle("{$qtyColumnLetter}{$summaryPivotHeaderRow}:{$uomColumnLetter}{$summaryPivotSubHeaderRow}")
+            ->getAlignment()
+            ->setWrapText(true)
+            ->setHorizontal(Alignment::HORIZONTAL_CENTER)
+            ->setVertical(Alignment::VERTICAL_CENTER);
+        $summarySheet->getStyle("{$qtyColumnLetter}{$summaryPivotHeaderRow}:{$uomColumnLetter}{$summaryPivotSubHeaderRow}")
+            ->applyFromArray($borderStyle);
+
+        $summarySheet->getColumnDimension($qtyColumnLetter)->setAutoSize(false)->setWidth(10);
+        $summarySheet->getColumnDimension($uomColumnLetter)->setAutoSize(false)->setWidth(8);
+
+        $productCodeKey = strtoupper(trim((string)(isset($pivotData['product_code']) ? $pivotData['product_code'] : '')));
+        if ($productCodeKey !== '') {
+            $summaryProductColumnsByCode[$productCodeKey] = [
+                'qty_column' => $qtyColumnLetter,
+                'uom_column' => $uomColumnLetter,
+                'uom' => isset($pivotData['uom']) ? (string)$pivotData['uom'] : ''
+            ];
+        }
+    }
+
+    foreach ($summaryProductTypeGroups as $typeGroup) {
+        $typeStartColumnLetter = columnIndexToLetter($typeGroup['start_column_index']);
+        $typeEndColumnLetter = columnIndexToLetter($typeGroup['end_column_index']);
+        $summarySheet->mergeCells("{$typeStartColumnLetter}{$summaryPivotHeaderRow}:{$typeEndColumnLetter}{$summaryPivotHeaderRow}");
+        $summarySheet->setCellValue("{$typeStartColumnLetter}{$summaryPivotHeaderRow}", $typeGroup['label']);
+    }
+
+    if ($summaryPivotLastColumnIndex >= $summaryPivotStartColumnIndex) {
+        $summaryPivotFirstColumnLetter = columnIndexToLetter($summaryPivotStartColumnIndex);
+        $summaryPivotLastColumnLetter = columnIndexToLetter($summaryPivotLastColumnIndex);
+        $summarySheet->mergeCells("{$summaryPivotFirstColumnLetter}{$summaryPivotTitleRow}:{$summaryPivotLastColumnLetter}{$summaryPivotTitleRow}");
+        $summarySheet->setCellValue("{$summaryPivotFirstColumnLetter}{$summaryPivotTitleRow}", 'PRODUCT');
+        $summarySheet->getStyle("{$summaryPivotFirstColumnLetter}{$summaryPivotTitleRow}:{$summaryPivotLastColumnLetter}{$summaryPivotTitleRow}")
+            ->getFont()
+            ->setBold(true);
+        $summarySheet->getStyle("{$summaryPivotFirstColumnLetter}{$summaryPivotTitleRow}:{$summaryPivotLastColumnLetter}{$summaryPivotTitleRow}")
+            ->getAlignment()
+            ->setHorizontal(Alignment::HORIZONTAL_LEFT)
+            ->setVertical(Alignment::VERTICAL_CENTER);
+
+        $summaryPivotRowPointer = $summaryDataRow;
+        foreach ($summaryByDate as $saleDate => $totals) {
+            foreach ($summaryProductColumnsByCode as $productCodeKey => $columnMeta) {
+                if (!isset($productPivotByDate[$saleDate][$productCodeKey])) {
+                    continue;
+                }
+                $pivotDateValue = $productPivotByDate[$saleDate][$productCodeKey];
+                $qtyValue = isset($pivotDateValue['qty']) ? (float)$pivotDateValue['qty'] : 0.0;
+                $uomValue = trim((string)(isset($pivotDateValue['uom']) ? $pivotDateValue['uom'] : ''));
+                if ($uomValue === '') {
+                    $uomValue = trim((string)$columnMeta['uom']);
+                }
+                if ($qtyValue != 0.0) {
+                    $summarySheet->setCellValue($columnMeta['qty_column'] . $summaryPivotRowPointer, $qtyValue);
+                }
+                if ($uomValue !== '') {
+                    $summarySheet->setCellValue($columnMeta['uom_column'] . $summaryPivotRowPointer, $uomValue);
+                }
+            }
+            $summaryPivotRowPointer++;
+        }
+
+        foreach ($summaryProductColumnsByCode as $columnMeta) {
+            $qtyColumnLetter = $columnMeta['qty_column'];
+            $uomColumnLetter = $columnMeta['uom_column'];
+            if ($lastSummaryDetailRow >= $summaryDataRow) {
+                $summarySheet->setCellValue("{$qtyColumnLetter}{$summaryTotalRow}", "=SUM({$qtyColumnLetter}{$summaryDataRow}:{$qtyColumnLetter}{$lastSummaryDetailRow})");
+            } else {
+                $summarySheet->setCellValue("{$qtyColumnLetter}{$summaryTotalRow}", 0);
+            }
+            $summarySheet->setCellValue("{$uomColumnLetter}{$summaryTotalRow}", isset($columnMeta['uom']) ? (string)$columnMeta['uom'] : '');
+        }
+
+        $summarySheet->getStyle("{$summaryPivotFirstColumnLetter}{$summaryPivotSubHeaderRow}:{$summaryPivotLastColumnLetter}{$summaryTotalRow}")
+            ->applyFromArray($borderStyle);
+        $summarySheet->getStyle("{$summaryPivotFirstColumnLetter}{$summaryPivotSubHeaderRow}:{$summaryPivotLastColumnLetter}{$summaryTotalRow}")
+            ->getAlignment()
+            ->setHorizontal(Alignment::HORIZONTAL_CENTER)
+            ->setVertical(Alignment::VERTICAL_CENTER);
+        foreach ($summaryProductColumnsByCode as $columnMeta) {
+            $qtyColumnLetter = $columnMeta['qty_column'];
+            $summarySheet->getStyle("{$qtyColumnLetter}{$summaryDataRow}:{$qtyColumnLetter}{$summaryTotalRow}")
+                ->getNumberFormat()
+                ->setFormatCode('#,##0.00');
+        }
+    }
+}
 
 if ($currentRow >= $summaryHeaderRow) {
     $summarySheet->getStyle("A{$summaryHeaderRow}:I{$currentRow}")->applyFromArray($borderStyle);

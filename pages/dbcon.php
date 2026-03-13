@@ -1,16 +1,25 @@
 <?php
-   // define database related variables
-   $database = 'cdd';
-   $host = 'localhost';
-   $user = 'root';
-   $pass = '';
+// Define database related variables.
+$database = 'cdd';
+$host = 'localhost';
+$user = 'root';
+$pass = '';
 
-   // try to conncet to database
-   $dbh = new PDO("mysql:dbname={$database};host={$host};port={3306}", $user, $pass);
+if (!isset($dbh) || !($dbh instanceof PDO)) {
+    try {
+        $dsn = "mysql:host={$host};dbname={$database};port=3306;charset=utf8mb4";
+        $options = [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::ATTR_EMULATE_PREPARES => false,
+            PDO::ATTR_PERSISTENT => false,
+            PDO::ATTR_TIMEOUT => 5,
+        ];
 
-   if(!$dbh){
-
-      echo "unable to connect to database";
-   }
-   
+        $dbh = new PDO($dsn, $user, $pass, $options);
+    } catch (PDOException $e) {
+        error_log('dbcon.php connection failed: ' . $e->getMessage());
+        $dbh = null;
+    }
+}
 ?>

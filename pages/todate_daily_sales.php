@@ -21,7 +21,7 @@ $today = date('Y-m-d');
 $startInput = isset($_GET['start']) ? trim((string)$_GET['start']) : '';
 $endInput = isset($_GET['end']) ? trim((string)$_GET['end']) : '';
 $reportTypeInput = isset($_GET['report_type']) ? trim((string)$_GET['report_type']) : '';
-$reportType = in_array($reportTypeInput, ['detailed', 'by_product', 'by_customer'], true) ? $reportTypeInput : 'detailed';
+$reportType = in_array($reportTypeInput, ['detailed'], true) ? $reportTypeInput : 'detailed';
 
 $startDate = $startInput !== '' ? $startInput : $today;
 $endDate = $endInput !== '' ? $endInput : $today;
@@ -223,6 +223,7 @@ function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
              FROM sales s
              LEFT JOIN customer_register c ON c.customer_code = s.customer_code
              WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) BETWEEN ? AND ?
+              AND (s.void_status IS NULL OR s.void_status = 0)
              ORDER BY COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created), s.order_no, s.lineitem";
 
     $stmt = $mysqli->prepare($sql);
@@ -466,6 +467,31 @@ ob_start();
     .todate-daily-sales-table .dataTables_scrollBody table {
         width: 100% !important;
     }
+    .todate-daily-sales-table .dataTables_scrollBody {
+        overflow-x: scroll !important;
+        overflow-y: auto !important;
+        scrollbar-gutter: stable both-edges;
+        scrollbar-width: auto;
+        scrollbar-color: #4b5563 #d1d5db;
+    }
+    .todate-daily-sales-table .dataTables_scrollBody::-webkit-scrollbar {
+        height: 12px;
+    }
+    .todate-daily-sales-table .dataTables_scrollBody::-webkit-scrollbar-track {
+        background: #d1d5db;
+    }
+    .todate-daily-sales-table .dataTables_scrollBody::-webkit-scrollbar-thumb {
+        background: #4b5563;
+        border-radius: 10px;
+        border: 2px solid #d1d5db;
+    }
+    .todate-daily-sales-table .dataTables_scrollBody::-webkit-scrollbar-thumb:hover {
+        background: #374151;
+    }
+    .todate-daily-sales-table table {
+        min-width: 1600px;
+        white-space: nowrap;
+    }
 </style>
 <?php
 $styles = ob_get_clean();
@@ -494,15 +520,13 @@ ob_start();
                         <label for="report-type" class="form-label text-muted small mb-1">Report Type</label>
                         <select id="report-type" name="report_type" class="form-select">
                             <option value="detailed" <?php echo $reportMeta['report_type'] === 'detailed' ? 'selected' : ''; ?>>Detailed</option>
-                            <option value="by_product" <?php echo $reportMeta['report_type'] === 'by_product' ? 'selected' : ''; ?>>By Product</option>
-                            <option value="by_customer" <?php echo $reportMeta['report_type'] === 'by_customer' ? 'selected' : ''; ?>>By Customer</option>
                         </select>
                     </div>
                     <div class="col-auto">
                         <button type="submit" class="btn btn-primary">View</button>
                     </div>
                     <div class="col-auto">
-                        <a class="btn btn-outline-secondary" href="print_todate_daily_sales.php?start=<?php echo urlencode($reportMeta['start_date']); ?>&end=<?php echo urlencode($reportMeta['end_date']); ?>&amp;report_type=<?php echo urlencode($reportMeta['report_type']); ?>">
+                        <a class="btn btn-outline-secondary" href="print_todate_daily_sales.php?start=<?php echo urlencode($reportMeta['start_date']); ?>&end=<?php echo urlencode($reportMeta['end_date']); ?>">
                             Export Excel
                         </a>
                     </div>
@@ -679,6 +703,7 @@ ob_start();
                                         <th>Time</th>
                                         <th>DR No.</th>
                                         <th>Customer Code</th>
+                                        <th>Customer Name</th>
                                         <th class="text-end">Quantity</th>
                                         <th>Product Code</th>
                                         <th>Product Description</th>
@@ -691,14 +716,30 @@ ob_start();
                                     </tr>
                                 </thead>
                                 <tbody>
+                                    <?php
+                                    $transactionSequence = 0;
+                                    $transactionNumberByOrder = [];
+                                    $transactionRenderedByOrder = [];
+                                    ?>
                                     <?php foreach ($registerRows as $index => $row): ?>
-                                        <?php $orderNoDisplay = $row['order_no'] !== '' ? 'DR' . $row['order_no'] : ''; ?>
+                                        <?php
+                                        $orderNoRaw = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+                                        $transactionKey = $orderNoRaw !== '' ? $orderNoRaw : '__ROW_' . $index;
+                                        if (!isset($transactionNumberByOrder[$transactionKey])) {
+                                            $transactionSequence++;
+                                            $transactionNumberByOrder[$transactionKey] = $transactionSequence;
+                                        }
+                                        $showTransactionNumber = !isset($transactionRenderedByOrder[$transactionKey]);
+                                        $transactionRenderedByOrder[$transactionKey] = true;
+                                        $orderNoDisplay = $row['order_no'] !== '' ? 'DR' . $row['order_no'] : '';
+                                        ?>
                                         <tr>
-                                            <td class="text-center"><?php echo $index + 1; ?></td>
+                                            <td class="text-center"><?php echo $showTransactionNumber ? $transactionNumberByOrder[$transactionKey] : ''; ?></td>
                                             <td><?php echo htmlspecialchars($row['date']); ?></td>
                                             <td><?php echo htmlspecialchars($row['time']); ?></td>
                                             <td><?php echo htmlspecialchars($orderNoDisplay); ?></td>
                                             <td><?php echo htmlspecialchars($row['customer_code']); ?></td>
+                                            <td><?php echo htmlspecialchars($row['customer_name']); ?></td>
                                             <td class="text-end"><?php echo number_format($row['qty'], 2); ?></td>
                                             <td><?php echo htmlspecialchars($row['product_code']); ?></td>
                                             <td><?php echo htmlspecialchars($row['product_description']); ?></td>

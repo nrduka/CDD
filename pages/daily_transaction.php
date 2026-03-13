@@ -287,7 +287,8 @@ function fetch_monthly_summary($mysqli, $startDate, $endDate)
     $sql = "SELECT SUM(s.amount) AS total_sales,
                    COUNT(DISTINCT CASE WHEN s.order_no <> '' THEN s.order_no END) AS transaction_count
             FROM sales s
-            WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) BETWEEN ? AND ?";
+            WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) BETWEEN ? AND ?
+              AND (s.void_status IS NULL OR s.void_status = 0)";
     $stmt = $mysqli->prepare($sql);
     if ($stmt) {
         $stmt->bind_param('ss', $startDate, $endDate);
@@ -338,6 +339,7 @@ if (!isset($mysqli) || !$mysqli) {
             LEFT JOIN customer_register c ON c.customer_code = s.customer_code
             LEFT JOIN ice_product p ON p.product_code = s.product_code
             WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) = ?
+              AND (s.void_status IS NULL OR s.void_status = 0)
             ORDER BY COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created), s.order_no, s.lineitem";
     $stmt = $mysqli->prepare($sql);
     if (!$stmt) {
@@ -373,6 +375,7 @@ if (!isset($mysqli) || !$mysqli) {
                     'time' => $timeLabel,
                     'order_no' => $orderNo,
                     'customer_code' => trim((string)(isset($row['customer_code']) ? $row['customer_code'] : '')),
+                    'customer_name' => buildCustomerDisplayName($row),
                     'qty' => isset($row['qty']) ? (float)$row['qty'] : 0.0,
                     'product_code' => (string)(isset($row['product_code']) ? $row['product_code'] : ''),
                     'product_description' => (string)(isset($row['product_description']) ? $row['product_description'] : ''),
@@ -618,9 +621,28 @@ ob_start();
     }
     .daily-transaction-table .dataTables_scrollBody {
         overflow-x: scroll !important;
+        overflow-y: auto !important;
+        scrollbar-gutter: stable both-edges;
+        scrollbar-width: auto;
+        scrollbar-color: #4b5563 #d1d5db;
+    }
+    .daily-transaction-table .dataTables_scrollBody::-webkit-scrollbar {
+        height: 12px;
+    }
+    .daily-transaction-table .dataTables_scrollBody::-webkit-scrollbar-track {
+        background: #d1d5db;
+    }
+    .daily-transaction-table .dataTables_scrollBody::-webkit-scrollbar-thumb {
+        background: #4b5563;
+        border-radius: 10px;
+        border: 2px solid #d1d5db;
+    }
+    .daily-transaction-table .dataTables_scrollBody::-webkit-scrollbar-thumb:hover {
+        background: #374151;
     }
     .daily-transaction-table table {
         min-width: 1600px;
+        white-space: nowrap;
     }
     @media print {
         @page {
@@ -795,6 +817,7 @@ ob_start();
                                         <th>Time</th>
                                         <th>DR No.</th>
                                         <th>Customer Code</th>
+                                        <th>Customer Name</th>
                                         <th class="text-end">Quantity</th>
                                         <th>Product Code</th>
                                         <th>Product Description</th>
@@ -808,11 +831,26 @@ ob_start();
                                     </tr>
                                 </thead>
                                 <tbody>
+                                    <?php
+                                    $transactionSequence = 0;
+                                    $transactionNumberByOrder = [];
+                                    $transactionRenderedByOrder = [];
+                                    ?>
                                     <?php foreach ($registerRows as $index => $row): ?>
-                                        <?php $orderNoDisplay = $row['order_no'] !== '' ? 'DR' . $row['order_no'] : ''; ?>
+                                        <?php
+                                        $orderNoRaw = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+                                        $transactionKey = $orderNoRaw !== '' ? $orderNoRaw : '__ROW_' . $index;
+                                        if (!isset($transactionNumberByOrder[$transactionKey])) {
+                                            $transactionSequence++;
+                                            $transactionNumberByOrder[$transactionKey] = $transactionSequence;
+                                        }
+                                        $showTransactionNumber = !isset($transactionRenderedByOrder[$transactionKey]);
+                                        $transactionRenderedByOrder[$transactionKey] = true;
+                                        $orderNoDisplay = $row['order_no'] !== '' ? 'DR' . $row['order_no'] : '';
+                                        ?>
                                         <?php $orderVoid = !empty($orders[$row['order_no']]['void_status']); ?>
                                         <tr>
-                                            <td class="text-center"><?php echo $index + 1; ?></td>
+                                            <td class="text-center"><?php echo $showTransactionNumber ? $transactionNumberByOrder[$transactionKey] : ''; ?></td>
                                             <td><?php echo htmlspecialchars($row['date']); ?></td>
                                             <td><?php echo htmlspecialchars($row['time']); ?></td>
                                             <td>
@@ -824,6 +862,7 @@ ob_start();
                                                 </div>
                                             </td>
                                             <td><?php echo htmlspecialchars($row['customer_code']); ?></td>
+                                            <td><?php echo htmlspecialchars($row['customer_name']); ?></td>
                                             <td class="text-end"><?php echo number_format($row['qty'], 2); ?></td>
                                             <td><?php echo htmlspecialchars($row['product_code']); ?></td>
                                             <td><?php echo htmlspecialchars($row['product_description']); ?></td>
