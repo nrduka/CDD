@@ -671,7 +671,10 @@ ob_start();
                         <button type="submit" class="btn btn-primary">View</button>
                     </div>
                     <div class="col-auto">
-                        <a class="btn btn-outline-secondary" href="print_todate_daily_sales_summary.php?start=<?php echo urlencode($reportMeta['start_date']); ?>&end=<?php echo urlencode($reportMeta['end_date']); ?>&amp;report_type=<?php echo urlencode($reportMeta['report_type']); ?>">
+                        <?php $exportPrintPage = $reportMeta['report_type'] === 'by_customer'
+                            ? 'print_todate_daily_sales_summary_customer.php'
+                            : 'print_todate_daily_sales_summary.php'; ?>
+                        <a class="btn btn-outline-secondary" href="<?php echo $exportPrintPage; ?>?start=<?php echo urlencode($reportMeta['start_date']); ?>&end=<?php echo urlencode($reportMeta['end_date']); ?>&amp;report_type=<?php echo urlencode($reportMeta['report_type']); ?>">
                             Export Excel
                         </a>
                     </div>

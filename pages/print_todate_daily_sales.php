@@ -979,7 +979,7 @@ $summaryDataRow = $reportType === 'by_product' ? 10 : 9;
 $summaryHeaders = [
     'NO.',
     'DATE',
-    'TOTAL TRANSACTION',
+    'TRANSACTION COUNT',
     'TOTAL QTY',
     'TOTAL AMOUNT',
     'AMOUNT RECEIVED',

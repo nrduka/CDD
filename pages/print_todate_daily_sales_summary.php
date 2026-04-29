@@ -653,6 +653,8 @@ $registerRows = fetchToDateRegisterRows($mysqli, $startDate, $endDate);
 $registerRows = enrichRegisterRowsWithOrderPayments($registerRows);
 $productPivotRows = buildProductPivotRows($registerRows);
 $productPivotByDate = buildProductPivotByDate($registerRows);
+$otherPivotRows = buildOthersPivotRows($registerRows);
+$otherPivotByDate = buildOthersPivotByDate($registerRows);
 $totalSales = 0;
 $uniqueOrders = [];
 foreach ($registerRows as $row) {
@@ -1157,11 +1159,11 @@ $summarySheet->setCellValue('A2', 'Date Range: ' . $rangeLabel);
 $summarySheet->setCellValue('A3', 'Generated: ' . $generatedAt);
 
 $summaryHeaderRow = 8;
-$summaryDataRow = $reportType === 'by_product' ? 10 : 9;
+$summaryDataRow = 9;
 $summaryHeaders = [
     'NO.',
     'DATE',
-    'TOTAL TRANSACTION',
+    'TRANSACTION COUNT',
     'TOTAL QTY',
     'TOTAL AMOUNT',
     'AMOUNT RECEIVED',
@@ -1226,22 +1228,20 @@ $summarySheet->getStyle("A{$currentRow}:I{$currentRow}")->getFont()->setBold(tru
 $summarySheet->getStyle("D{$currentRow}:I{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
 
 $summaryTotalRow = $currentRow;
-if ($reportType === 'by_product' && !empty($productPivotRows)) {
+if ($reportType === 'by_product' && (!empty($productPivotRows) || !empty($otherPivotRows))) {
     $summaryPivotHeaderRow = 6;
     $summaryPivotCodeRow = 7;
     $summaryPivotDescriptionRow = 8;
-    $summaryPivotSubHeaderRow = 9;
     $summaryPivotTitleRow = 5;
     $summaryPivotStartColumnIndex = 10; // J
     $summaryPivotLastColumnIndex = $summaryPivotStartColumnIndex - 1;
     $summaryProductColumnsByCode = [];
     $summaryProductTypeGroups = [];
+
     foreach ($productPivotRows as $pivotIndex => $pivotData) {
-        $qtyColumnIndex = $summaryPivotStartColumnIndex + ($pivotIndex * 2);
-        $uomColumnIndex = $qtyColumnIndex + 1;
+        $qtyColumnIndex = $summaryPivotStartColumnIndex + $pivotIndex;
         $qtyColumnLetter = columnIndexToLetter($qtyColumnIndex);
-        $uomColumnLetter = columnIndexToLetter($uomColumnIndex);
-        $summaryPivotLastColumnIndex = $uomColumnIndex;
+        $summaryPivotLastColumnIndex = $qtyColumnIndex;
 
         $productTypeLabel = isset($pivotData['product_type']) ? trim((string)$pivotData['product_type']) : '';
         $productTypeKey = strtoupper($productTypeLabel);
@@ -1250,45 +1250,43 @@ if ($reportType === 'by_product' && !empty($productPivotRows)) {
                 'key' => $productTypeKey,
                 'label' => $productTypeLabel,
                 'start_column_index' => $qtyColumnIndex,
-                'end_column_index' => $uomColumnIndex
+                'end_column_index' => $qtyColumnIndex
             ];
         } else {
             $lastTypeGroupIndex = count($summaryProductTypeGroups) - 1;
-            $summaryProductTypeGroups[$lastTypeGroupIndex]['end_column_index'] = $uomColumnIndex;
+            $summaryProductTypeGroups[$lastTypeGroupIndex]['end_column_index'] = $qtyColumnIndex;
             if ($summaryProductTypeGroups[$lastTypeGroupIndex]['label'] === '' && $productTypeLabel !== '') {
                 $summaryProductTypeGroups[$lastTypeGroupIndex]['label'] = $productTypeLabel;
             }
         }
 
-        $summarySheet->mergeCells("{$qtyColumnLetter}{$summaryPivotCodeRow}:{$uomColumnLetter}{$summaryPivotCodeRow}");
-        $summarySheet->mergeCells("{$qtyColumnLetter}{$summaryPivotDescriptionRow}:{$uomColumnLetter}{$summaryPivotDescriptionRow}");
-        $summarySheet->setCellValue("{$qtyColumnLetter}{$summaryPivotCodeRow}", isset($pivotData['product_code']) ? (string)$pivotData['product_code'] : '');
-        $summarySheet->setCellValue("{$qtyColumnLetter}{$summaryPivotDescriptionRow}", isset($pivotData['product_description']) ? (string)$pivotData['product_description'] : '');
-        $summarySheet->setCellValue("{$qtyColumnLetter}{$summaryPivotSubHeaderRow}", 'QTY');
-        $summarySheet->setCellValue("{$uomColumnLetter}{$summaryPivotSubHeaderRow}", 'UOM');
+        $productDescriptionHeader = isset($pivotData['product_description']) ? (string)$pivotData['product_description'] : '';
+        $uomHeader = trim((string)(isset($pivotData['uom']) ? $pivotData['uom'] : ''));
+        if ($uomHeader !== '') {
+            $productDescriptionHeader .= "\n(" . $uomHeader . ')';
+        }
 
-        $summarySheet->getStyle("{$qtyColumnLetter}{$summaryPivotHeaderRow}:{$uomColumnLetter}{$summaryPivotSubHeaderRow}")
+        $summarySheet->setCellValue("{$qtyColumnLetter}{$summaryPivotCodeRow}", isset($pivotData['product_code']) ? (string)$pivotData['product_code'] : '');
+        $summarySheet->setCellValue("{$qtyColumnLetter}{$summaryPivotDescriptionRow}", $productDescriptionHeader);
+        $summarySheet->getStyle("{$qtyColumnLetter}{$summaryPivotHeaderRow}:{$qtyColumnLetter}{$summaryPivotDescriptionRow}")
             ->getFont()
             ->setBold(true)
             ->getColor()
             ->setRGB('000000');
-        $summarySheet->getStyle("{$qtyColumnLetter}{$summaryPivotHeaderRow}:{$uomColumnLetter}{$summaryPivotSubHeaderRow}")
+        $summarySheet->getStyle("{$qtyColumnLetter}{$summaryPivotHeaderRow}:{$qtyColumnLetter}{$summaryPivotDescriptionRow}")
             ->getAlignment()
             ->setWrapText(true)
             ->setHorizontal(Alignment::HORIZONTAL_CENTER)
             ->setVertical(Alignment::VERTICAL_CENTER);
-        $summarySheet->getStyle("{$qtyColumnLetter}{$summaryPivotHeaderRow}:{$uomColumnLetter}{$summaryPivotSubHeaderRow}")
+        $summarySheet->getStyle("{$qtyColumnLetter}{$summaryPivotHeaderRow}:{$qtyColumnLetter}{$summaryPivotDescriptionRow}")
             ->applyFromArray($borderStyle);
 
-        $summarySheet->getColumnDimension($qtyColumnLetter)->setAutoSize(false)->setWidth(10);
-        $summarySheet->getColumnDimension($uomColumnLetter)->setAutoSize(false)->setWidth(8);
+        $summarySheet->getColumnDimension($qtyColumnLetter)->setAutoSize(false)->setWidth(14);
 
         $productCodeKey = strtoupper(trim((string)(isset($pivotData['product_code']) ? $pivotData['product_code'] : '')));
         if ($productCodeKey !== '') {
             $summaryProductColumnsByCode[$productCodeKey] = [
-                'qty_column' => $qtyColumnLetter,
-                'uom_column' => $uomColumnLetter,
-                'uom' => isset($pivotData['uom']) ? (string)$pivotData['uom'] : ''
+                'qty_column' => $qtyColumnLetter
             ];
         }
     }
@@ -1301,6 +1299,10 @@ if ($reportType === 'by_product' && !empty($productPivotRows)) {
         }
         $summarySheet->setCellValue("{$typeStartColumnLetter}{$summaryPivotHeaderRow}", $typeGroup['label']);
     }
+
+    $summaryFinalLastColumnLetter = '';
+    $summaryOtherColumnsByCode = [];
+    $summaryOtherFirstColumnIndex = null;
 
     if ($summaryPivotLastColumnIndex >= $summaryPivotStartColumnIndex) {
         $summaryPivotFirstColumnLetter = columnIndexToLetter($summaryPivotStartColumnIndex);
@@ -1317,61 +1319,151 @@ if ($reportType === 'by_product' && !empty($productPivotRows)) {
             ->setHorizontal(Alignment::HORIZONTAL_CENTER)
             ->setVertical(Alignment::VERTICAL_CENTER);
 
-        $summaryPivotRowPointer = $summaryDataRow;
-        foreach ($summaryByDate as $saleDate => $totals) {
-            foreach ($summaryProductColumnsByCode as $productCodeKey => $columnMeta) {
-                if (!isset($productPivotByDate[$saleDate][$productCodeKey])) {
-                    continue;
-                }
-                $pivotDateValue = $productPivotByDate[$saleDate][$productCodeKey];
-                $qtyValue = isset($pivotDateValue['qty']) ? (float)$pivotDateValue['qty'] : 0.0;
-                $uomValue = trim((string)(isset($pivotDateValue['uom']) ? $pivotDateValue['uom'] : ''));
-                if ($uomValue === '') {
-                    $uomValue = trim((string)$columnMeta['uom']);
-                }
-                if ($qtyValue != 0.0) {
-                    $summarySheet->setCellValue($columnMeta['qty_column'] . $summaryPivotRowPointer, $qtyValue);
-                }
-                if ($uomValue !== '') {
-                    $summarySheet->setCellValue($columnMeta['uom_column'] . $summaryPivotRowPointer, $uomValue);
-                }
+        $summaryFinalLastColumnLetter = $summaryPivotLastColumnLetter;
+    }
+
+    if (!empty($otherPivotRows)) {
+        $summaryOtherStartColumnIndex = $summaryPivotLastColumnIndex >= $summaryPivotStartColumnIndex
+            ? $summaryPivotLastColumnIndex + 1
+            : $summaryPivotStartColumnIndex;
+        $summaryOtherLastColumnIndex = $summaryOtherStartColumnIndex - 1;
+
+        foreach ($otherPivotRows as $otherIndex => $otherData) {
+            $otherQtyColumnIndex = $summaryOtherStartColumnIndex + $otherIndex;
+            $otherQtyColumnLetter = columnIndexToLetter($otherQtyColumnIndex);
+            $summaryOtherLastColumnIndex = $otherQtyColumnIndex;
+            if ($summaryOtherFirstColumnIndex === null) {
+                $summaryOtherFirstColumnIndex = $otherQtyColumnIndex;
             }
-            $summaryPivotRowPointer++;
+
+            $otherDescriptionHeader = isset($otherData['product_description']) ? (string)$otherData['product_description'] : '';
+            $otherUomHeader = trim((string)(isset($otherData['uom']) ? $otherData['uom'] : ''));
+            if ($otherUomHeader !== '') {
+                $otherDescriptionHeader .= "\n(" . $otherUomHeader . ')';
+            }
+
+            $summarySheet->setCellValue("{$otherQtyColumnLetter}{$summaryPivotCodeRow}", isset($otherData['product_code']) ? (string)$otherData['product_code'] : '');
+            $summarySheet->setCellValue("{$otherQtyColumnLetter}{$summaryPivotDescriptionRow}", $otherDescriptionHeader);
+            $summarySheet->getStyle("{$otherQtyColumnLetter}{$summaryPivotHeaderRow}:{$otherQtyColumnLetter}{$summaryPivotDescriptionRow}")
+                ->getFont()
+                ->setBold(true)
+                ->getColor()
+                ->setRGB('000000');
+            $summarySheet->getStyle("{$otherQtyColumnLetter}{$summaryPivotHeaderRow}:{$otherQtyColumnLetter}{$summaryPivotDescriptionRow}")
+                ->getAlignment()
+                ->setWrapText(true)
+                ->setHorizontal(Alignment::HORIZONTAL_CENTER)
+                ->setVertical(Alignment::VERTICAL_CENTER);
+            $summarySheet->getStyle("{$otherQtyColumnLetter}{$summaryPivotHeaderRow}:{$otherQtyColumnLetter}{$summaryPivotDescriptionRow}")
+                ->applyFromArray($borderStyle);
+            $summarySheet->getColumnDimension($otherQtyColumnLetter)->setAutoSize(false)->setWidth(14);
+
+            $otherProductCodeKey = strtoupper(trim((string)(isset($otherData['product_code']) ? $otherData['product_code'] : '')));
+            if ($otherProductCodeKey !== '') {
+                $summaryOtherColumnsByCode[$otherProductCodeKey] = [
+                    'qty_column' => $otherQtyColumnLetter
+                ];
+            }
         }
 
-        foreach ($summaryProductColumnsByCode as $columnMeta) {
-            $qtyColumnLetter = $columnMeta['qty_column'];
-            $uomColumnLetter = $columnMeta['uom_column'];
-            if ($lastSummaryDetailRow >= $summaryDataRow) {
-                $summarySheet->setCellValue("{$qtyColumnLetter}{$summaryTotalRow}", "=SUM({$qtyColumnLetter}{$summaryDataRow}:{$qtyColumnLetter}{$lastSummaryDetailRow})");
-            } else {
-                $summarySheet->setCellValue("{$qtyColumnLetter}{$summaryTotalRow}", 0);
+        if ($summaryOtherFirstColumnIndex !== null) {
+            $summaryOtherFirstColumnLetter = columnIndexToLetter($summaryOtherFirstColumnIndex);
+            $summaryOtherLastColumnLetter = columnIndexToLetter($summaryOtherLastColumnIndex);
+            if ($summaryOtherFirstColumnLetter !== $summaryOtherLastColumnLetter) {
+                $summarySheet->mergeCells("{$summaryOtherFirstColumnLetter}{$summaryPivotTitleRow}:{$summaryOtherLastColumnLetter}{$summaryPivotTitleRow}");
             }
-            $summarySheet->setCellValue("{$uomColumnLetter}{$summaryTotalRow}", isset($columnMeta['uom']) ? (string)$columnMeta['uom'] : '');
+            $summarySheet->setCellValue("{$summaryOtherFirstColumnLetter}{$summaryPivotTitleRow}", 'OTHERS PRODUCT');
+            $summarySheet->getStyle("{$summaryOtherFirstColumnLetter}{$summaryPivotTitleRow}:{$summaryOtherLastColumnLetter}{$summaryPivotTitleRow}")
+                ->getFont()
+                ->setBold(true);
+            $summarySheet->getStyle("{$summaryOtherFirstColumnLetter}{$summaryPivotTitleRow}:{$summaryOtherLastColumnLetter}{$summaryPivotTitleRow}")
+                ->getAlignment()
+                ->setHorizontal(Alignment::HORIZONTAL_CENTER)
+                ->setVertical(Alignment::VERTICAL_CENTER);
+            $summaryFinalLastColumnLetter = $summaryOtherLastColumnLetter;
+        }
+    }
+
+    $summaryPivotRowPointer = $summaryDataRow;
+    foreach ($summaryByDate as $saleDate => $totals) {
+        foreach ($summaryProductColumnsByCode as $productCodeKey => $columnMeta) {
+            if (!isset($productPivotByDate[$saleDate][$productCodeKey])) {
+                continue;
+            }
+            $pivotDateValue = $productPivotByDate[$saleDate][$productCodeKey];
+            $qtyValue = isset($pivotDateValue['qty']) ? (float)$pivotDateValue['qty'] : 0.0;
+            if ($qtyValue != 0.0) {
+                $summarySheet->setCellValue($columnMeta['qty_column'] . $summaryPivotRowPointer, $qtyValue);
+            }
         }
 
-        $summarySheet->getStyle("{$summaryPivotFirstColumnLetter}{$summaryPivotTitleRow}:{$summaryPivotLastColumnLetter}{$summaryTotalRow}")
+        foreach ($summaryOtherColumnsByCode as $otherProductCodeKey => $otherColumnMeta) {
+            if (!isset($otherPivotByDate[$saleDate][$otherProductCodeKey])) {
+                continue;
+            }
+            $otherPivotDateValue = $otherPivotByDate[$saleDate][$otherProductCodeKey];
+            $otherQtyValue = isset($otherPivotDateValue['qty']) ? (float)$otherPivotDateValue['qty'] : 0.0;
+            if ($otherQtyValue != 0.0) {
+                $summarySheet->setCellValue($otherColumnMeta['qty_column'] . $summaryPivotRowPointer, $otherQtyValue);
+            }
+        }
+
+        $summaryPivotRowPointer++;
+    }
+
+    foreach ($summaryProductColumnsByCode as $columnMeta) {
+        $qtyColumnLetter = $columnMeta['qty_column'];
+        if ($lastSummaryDetailRow >= $summaryDataRow) {
+            $summarySheet->setCellValue("{$qtyColumnLetter}{$summaryTotalRow}", "=SUM({$qtyColumnLetter}{$summaryDataRow}:{$qtyColumnLetter}{$lastSummaryDetailRow})");
+        } else {
+            $summarySheet->setCellValue("{$qtyColumnLetter}{$summaryTotalRow}", 0);
+        }
+    }
+    foreach ($summaryOtherColumnsByCode as $otherColumnMeta) {
+        $otherQtyColumnLetter = $otherColumnMeta['qty_column'];
+        if ($lastSummaryDetailRow >= $summaryDataRow) {
+            $summarySheet->setCellValue("{$otherQtyColumnLetter}{$summaryTotalRow}", "=SUM({$otherQtyColumnLetter}{$summaryDataRow}:{$otherQtyColumnLetter}{$lastSummaryDetailRow})");
+        } else {
+            $summarySheet->setCellValue("{$otherQtyColumnLetter}{$summaryTotalRow}", 0);
+        }
+    }
+
+    $summaryPivotFirstDataColumnIndex = null;
+    if ($summaryPivotLastColumnIndex >= $summaryPivotStartColumnIndex) {
+        $summaryPivotFirstDataColumnIndex = $summaryPivotStartColumnIndex;
+    } elseif ($summaryOtherFirstColumnIndex !== null) {
+        $summaryPivotFirstDataColumnIndex = $summaryOtherFirstColumnIndex;
+    }
+
+    if ($summaryPivotFirstDataColumnIndex !== null && $summaryFinalLastColumnLetter !== '') {
+        $summaryPivotFirstDataColumnLetter = columnIndexToLetter($summaryPivotFirstDataColumnIndex);
+        $summarySheet->getStyle("{$summaryPivotFirstDataColumnLetter}{$summaryPivotTitleRow}:{$summaryFinalLastColumnLetter}{$summaryTotalRow}")
             ->applyFromArray($borderStyle);
-        $summarySheet->getStyle("{$summaryPivotFirstColumnLetter}{$summaryPivotSubHeaderRow}:{$summaryPivotLastColumnLetter}{$summaryTotalRow}")
-            ->applyFromArray($borderStyle);
-        $summarySheet->getStyle("{$summaryPivotFirstColumnLetter}{$summaryPivotSubHeaderRow}:{$summaryPivotLastColumnLetter}{$summaryTotalRow}")
+        $summarySheet->getStyle("{$summaryPivotFirstDataColumnLetter}{$summaryPivotTitleRow}:{$summaryFinalLastColumnLetter}{$summaryPivotDescriptionRow}")
             ->getAlignment()
+            ->setWrapText(true)
             ->setHorizontal(Alignment::HORIZONTAL_CENTER)
             ->setVertical(Alignment::VERTICAL_CENTER);
-        $summarySheet->getStyle("{$summaryPivotFirstColumnLetter}{$summaryTotalRow}:{$summaryPivotLastColumnLetter}{$summaryTotalRow}")
+        $summarySheet->getStyle("{$summaryPivotFirstDataColumnLetter}{$summaryTotalRow}:{$summaryFinalLastColumnLetter}{$summaryTotalRow}")
             ->getFont()
             ->setBold(true)
             ->getColor()
             ->setRGB('000000');
+
         foreach ($summaryProductColumnsByCode as $columnMeta) {
             $qtyColumnLetter = $columnMeta['qty_column'];
             $summarySheet->getStyle("{$qtyColumnLetter}{$summaryDataRow}:{$qtyColumnLetter}{$summaryTotalRow}")
                 ->getNumberFormat()
                 ->setFormatCode('#,##0.00');
         }
+        foreach ($summaryOtherColumnsByCode as $otherColumnMeta) {
+            $otherQtyColumnLetter = $otherColumnMeta['qty_column'];
+            $summarySheet->getStyle("{$otherQtyColumnLetter}{$summaryDataRow}:{$otherQtyColumnLetter}{$summaryTotalRow}")
+                ->getNumberFormat()
+                ->setFormatCode('#,##0.00');
+        }
     }
 }
-
 if ($currentRow >= $summaryHeaderRow) {
     $summarySheet->getStyle("A{$summaryHeaderRow}:I{$currentRow}")->applyFromArray($borderStyle);
 }
@@ -1409,11 +1501,11 @@ if ($reportType === 'by_product') {
     $summaryUmuSheet->setCellValue('A3', 'Generated: ' . $generatedAt);
 
     $summaryUmuHeaderRow = 8;
-    $summaryUmuDataRow = 10;
+    $summaryUmuDataRow = 9;
     $summaryUmuHeaders = [
         'NO.',
         'DATE',
-        'TOTAL TRANSACTION',
+        'TRANSACTION COUNT',
         'TOTAL QTY (UMU)',
         'TOTAL AMOUNT',
         'AMOUNT RECEIVED',
@@ -1484,7 +1576,6 @@ if ($reportType === 'by_product') {
         $summaryUmuPivotHeaderRow = 6;
         $summaryUmuPivotCodeRow = 7;
         $summaryUmuPivotDescriptionRow = 8;
-        $summaryUmuPivotSubHeaderRow = 9;
         $summaryUmuPivotTitleRow = 5;
         $summaryUmuPivotStartColumnIndex = 10; // J
         $summaryUmuPivotLastColumnIndex = $summaryUmuPivotStartColumnIndex - 1;
@@ -1493,11 +1584,9 @@ if ($reportType === 'by_product') {
         $summaryUmuFirstQtyColumnLetter = '';
 
         foreach ($productPivotRowsUmu as $pivotIndex => $pivotData) {
-            $qtyColumnIndex = $summaryUmuPivotStartColumnIndex + ($pivotIndex * 2);
-            $uomColumnIndex = $qtyColumnIndex + 1;
+            $qtyColumnIndex = $summaryUmuPivotStartColumnIndex + $pivotIndex;
             $qtyColumnLetter = columnIndexToLetter($qtyColumnIndex);
-            $uomColumnLetter = columnIndexToLetter($uomColumnIndex);
-            $summaryUmuPivotLastColumnIndex = $uomColumnIndex;
+            $summaryUmuPivotLastColumnIndex = $qtyColumnIndex;
             if ($summaryUmuFirstQtyColumnLetter === '') {
                 $summaryUmuFirstQtyColumnLetter = $qtyColumnLetter;
             }
@@ -1509,45 +1598,43 @@ if ($reportType === 'by_product') {
                     'key' => $productTypeKey,
                     'label' => $productTypeLabel,
                     'start_column_index' => $qtyColumnIndex,
-                    'end_column_index' => $uomColumnIndex
+                    'end_column_index' => $qtyColumnIndex
                 ];
             } else {
                 $lastTypeGroupIndex = count($summaryUmuProductTypeGroups) - 1;
-                $summaryUmuProductTypeGroups[$lastTypeGroupIndex]['end_column_index'] = $uomColumnIndex;
+                $summaryUmuProductTypeGroups[$lastTypeGroupIndex]['end_column_index'] = $qtyColumnIndex;
                 if ($summaryUmuProductTypeGroups[$lastTypeGroupIndex]['label'] === '' && $productTypeLabel !== '') {
                     $summaryUmuProductTypeGroups[$lastTypeGroupIndex]['label'] = $productTypeLabel;
                 }
             }
 
-            $summaryUmuSheet->mergeCells("{$qtyColumnLetter}{$summaryUmuPivotCodeRow}:{$uomColumnLetter}{$summaryUmuPivotCodeRow}");
-            $summaryUmuSheet->mergeCells("{$qtyColumnLetter}{$summaryUmuPivotDescriptionRow}:{$uomColumnLetter}{$summaryUmuPivotDescriptionRow}");
-            $summaryUmuSheet->setCellValue("{$qtyColumnLetter}{$summaryUmuPivotCodeRow}", isset($pivotData['product_code']) ? (string)$pivotData['product_code'] : '');
-            $summaryUmuSheet->setCellValue("{$qtyColumnLetter}{$summaryUmuPivotDescriptionRow}", isset($pivotData['product_description']) ? (string)$pivotData['product_description'] : '');
-            $summaryUmuSheet->setCellValue("{$qtyColumnLetter}{$summaryUmuPivotSubHeaderRow}", 'QTY');
-            $summaryUmuSheet->setCellValue("{$uomColumnLetter}{$summaryUmuPivotSubHeaderRow}", 'UOM');
+            $productDescriptionHeader = isset($pivotData['product_description']) ? (string)$pivotData['product_description'] : '';
+            $uomHeader = trim((string)(isset($pivotData['uom']) ? $pivotData['uom'] : ''));
+            if ($uomHeader !== '') {
+                $productDescriptionHeader .= "\n(" . $uomHeader . ')';
+            }
 
-            $summaryUmuSheet->getStyle("{$qtyColumnLetter}{$summaryUmuPivotHeaderRow}:{$uomColumnLetter}{$summaryUmuPivotSubHeaderRow}")
+            $summaryUmuSheet->setCellValue("{$qtyColumnLetter}{$summaryUmuPivotCodeRow}", isset($pivotData['product_code']) ? (string)$pivotData['product_code'] : '');
+            $summaryUmuSheet->setCellValue("{$qtyColumnLetter}{$summaryUmuPivotDescriptionRow}", $productDescriptionHeader);
+            $summaryUmuSheet->getStyle("{$qtyColumnLetter}{$summaryUmuPivotHeaderRow}:{$qtyColumnLetter}{$summaryUmuPivotDescriptionRow}")
                 ->getFont()
                 ->setBold(true)
                 ->getColor()
                 ->setRGB('000000');
-            $summaryUmuSheet->getStyle("{$qtyColumnLetter}{$summaryUmuPivotHeaderRow}:{$uomColumnLetter}{$summaryUmuPivotSubHeaderRow}")
+            $summaryUmuSheet->getStyle("{$qtyColumnLetter}{$summaryUmuPivotHeaderRow}:{$qtyColumnLetter}{$summaryUmuPivotDescriptionRow}")
                 ->getAlignment()
                 ->setWrapText(true)
                 ->setHorizontal(Alignment::HORIZONTAL_CENTER)
                 ->setVertical(Alignment::VERTICAL_CENTER);
-            $summaryUmuSheet->getStyle("{$qtyColumnLetter}{$summaryUmuPivotHeaderRow}:{$uomColumnLetter}{$summaryUmuPivotSubHeaderRow}")
+            $summaryUmuSheet->getStyle("{$qtyColumnLetter}{$summaryUmuPivotHeaderRow}:{$qtyColumnLetter}{$summaryUmuPivotDescriptionRow}")
                 ->applyFromArray($borderStyle);
 
-            $summaryUmuSheet->getColumnDimension($qtyColumnLetter)->setAutoSize(false)->setWidth(10);
-            $summaryUmuSheet->getColumnDimension($uomColumnLetter)->setAutoSize(false)->setWidth(8);
+            $summaryUmuSheet->getColumnDimension($qtyColumnLetter)->setAutoSize(false)->setWidth(14);
 
             $productCodeKey = strtoupper(trim((string)(isset($pivotData['product_code']) ? $pivotData['product_code'] : '')));
             if ($productCodeKey !== '') {
                 $summaryUmuProductColumnsByCode[$productCodeKey] = [
-                    'qty_column' => $qtyColumnLetter,
-                    'uom_column' => $uomColumnLetter,
-                    'uom' => isset($pivotData['uom']) ? (string)$pivotData['uom'] : ''
+                    'qty_column' => $qtyColumnLetter
                 ];
             }
         }
@@ -1578,19 +1665,19 @@ if ($reportType === 'by_product') {
                 ->setHorizontal(Alignment::HORIZONTAL_CENTER)
                 ->setVertical(Alignment::VERTICAL_CENTER);
 
-            $summaryUmuSheet->mergeCells("{$summaryUmuGrandTotalColumnLetter}{$summaryUmuPivotHeaderRow}:{$summaryUmuGrandTotalColumnLetter}{$summaryUmuPivotSubHeaderRow}");
+            $summaryUmuSheet->mergeCells("{$summaryUmuGrandTotalColumnLetter}{$summaryUmuPivotHeaderRow}:{$summaryUmuGrandTotalColumnLetter}{$summaryUmuPivotDescriptionRow}");
             $summaryUmuSheet->setCellValue("{$summaryUmuGrandTotalColumnLetter}{$summaryUmuPivotHeaderRow}", 'TOTAL');
-            $summaryUmuSheet->getStyle("{$summaryUmuGrandTotalColumnLetter}{$summaryUmuPivotHeaderRow}:{$summaryUmuGrandTotalColumnLetter}{$summaryUmuPivotSubHeaderRow}")
+            $summaryUmuSheet->getStyle("{$summaryUmuGrandTotalColumnLetter}{$summaryUmuPivotHeaderRow}:{$summaryUmuGrandTotalColumnLetter}{$summaryUmuPivotDescriptionRow}")
                 ->getFont()
                 ->setBold(true)
                 ->getColor()
                 ->setRGB('000000');
-            $summaryUmuSheet->getStyle("{$summaryUmuGrandTotalColumnLetter}{$summaryUmuPivotHeaderRow}:{$summaryUmuGrandTotalColumnLetter}{$summaryUmuPivotSubHeaderRow}")
+            $summaryUmuSheet->getStyle("{$summaryUmuGrandTotalColumnLetter}{$summaryUmuPivotHeaderRow}:{$summaryUmuGrandTotalColumnLetter}{$summaryUmuPivotDescriptionRow}")
                 ->getAlignment()
                 ->setWrapText(true)
                 ->setHorizontal(Alignment::HORIZONTAL_CENTER)
                 ->setVertical(Alignment::VERTICAL_CENTER);
-            $summaryUmuSheet->getStyle("{$summaryUmuGrandTotalColumnLetter}{$summaryUmuPivotHeaderRow}:{$summaryUmuGrandTotalColumnLetter}{$summaryUmuPivotSubHeaderRow}")
+            $summaryUmuSheet->getStyle("{$summaryUmuGrandTotalColumnLetter}{$summaryUmuPivotHeaderRow}:{$summaryUmuGrandTotalColumnLetter}{$summaryUmuPivotDescriptionRow}")
                 ->applyFromArray($borderStyle);
             $summaryUmuSheet->getColumnDimension($summaryUmuGrandTotalColumnLetter)->setAutoSize(false)->setWidth(14);
 
@@ -1602,42 +1689,39 @@ if ($reportType === 'by_product') {
                 $summaryUmuOtherFirstColumnLetter = '';
 
                 foreach ($otherPivotRowsUmu as $otherIndex => $otherData) {
-                    $otherQtyColumnIndex = $summaryUmuOtherStartColumnIndex + ($otherIndex * 2);
-                    $otherUomColumnIndex = $otherQtyColumnIndex + 1;
+                    $otherQtyColumnIndex = $summaryUmuOtherStartColumnIndex + $otherIndex;
                     $otherQtyColumnLetter = columnIndexToLetter($otherQtyColumnIndex);
-                    $otherUomColumnLetter = columnIndexToLetter($otherUomColumnIndex);
-                    $summaryUmuOtherLastColumnIndex = $otherUomColumnIndex;
+                    $summaryUmuOtherLastColumnIndex = $otherQtyColumnIndex;
                     if ($summaryUmuOtherFirstColumnLetter === '') {
                         $summaryUmuOtherFirstColumnLetter = $otherQtyColumnLetter;
                     }
 
-                    $summaryUmuSheet->mergeCells("{$otherQtyColumnLetter}{$summaryUmuPivotCodeRow}:{$otherUomColumnLetter}{$summaryUmuPivotCodeRow}");
-                    $summaryUmuSheet->mergeCells("{$otherQtyColumnLetter}{$summaryUmuPivotDescriptionRow}:{$otherUomColumnLetter}{$summaryUmuPivotDescriptionRow}");
+                    $otherDescriptionHeader = isset($otherData['product_description']) ? (string)$otherData['product_description'] : '';
+                    $otherUomHeader = trim((string)(isset($otherData['uom']) ? $otherData['uom'] : ''));
+                    if ($otherUomHeader !== '') {
+                        $otherDescriptionHeader .= "\n(" . $otherUomHeader . ')';
+                    }
+
                     $summaryUmuSheet->setCellValue("{$otherQtyColumnLetter}{$summaryUmuPivotCodeRow}", isset($otherData['product_code']) ? (string)$otherData['product_code'] : '');
-                    $summaryUmuSheet->setCellValue("{$otherQtyColumnLetter}{$summaryUmuPivotDescriptionRow}", isset($otherData['product_description']) ? (string)$otherData['product_description'] : '');
-                    $summaryUmuSheet->setCellValue("{$otherQtyColumnLetter}{$summaryUmuPivotSubHeaderRow}", 'QTY');
-                    $summaryUmuSheet->setCellValue("{$otherUomColumnLetter}{$summaryUmuPivotSubHeaderRow}", 'UOM');
-                    $summaryUmuSheet->getStyle("{$otherQtyColumnLetter}{$summaryUmuPivotHeaderRow}:{$otherUomColumnLetter}{$summaryUmuPivotSubHeaderRow}")
+                    $summaryUmuSheet->setCellValue("{$otherQtyColumnLetter}{$summaryUmuPivotDescriptionRow}", $otherDescriptionHeader);
+                    $summaryUmuSheet->getStyle("{$otherQtyColumnLetter}{$summaryUmuPivotHeaderRow}:{$otherQtyColumnLetter}{$summaryUmuPivotDescriptionRow}")
                         ->getFont()
                         ->setBold(true)
                         ->getColor()
                         ->setRGB('000000');
-                    $summaryUmuSheet->getStyle("{$otherQtyColumnLetter}{$summaryUmuPivotHeaderRow}:{$otherUomColumnLetter}{$summaryUmuPivotSubHeaderRow}")
+                    $summaryUmuSheet->getStyle("{$otherQtyColumnLetter}{$summaryUmuPivotHeaderRow}:{$otherQtyColumnLetter}{$summaryUmuPivotDescriptionRow}")
                         ->getAlignment()
                         ->setWrapText(true)
                         ->setHorizontal(Alignment::HORIZONTAL_CENTER)
                         ->setVertical(Alignment::VERTICAL_CENTER);
-                    $summaryUmuSheet->getStyle("{$otherQtyColumnLetter}{$summaryUmuPivotHeaderRow}:{$otherUomColumnLetter}{$summaryUmuPivotSubHeaderRow}")
+                    $summaryUmuSheet->getStyle("{$otherQtyColumnLetter}{$summaryUmuPivotHeaderRow}:{$otherQtyColumnLetter}{$summaryUmuPivotDescriptionRow}")
                         ->applyFromArray($borderStyle);
-                    $summaryUmuSheet->getColumnDimension($otherQtyColumnLetter)->setAutoSize(false)->setWidth(10);
-                    $summaryUmuSheet->getColumnDimension($otherUomColumnLetter)->setAutoSize(false)->setWidth(8);
+                    $summaryUmuSheet->getColumnDimension($otherQtyColumnLetter)->setAutoSize(false)->setWidth(14);
 
                     $otherProductCodeKey = strtoupper(trim((string)(isset($otherData['product_code']) ? $otherData['product_code'] : '')));
                     if ($otherProductCodeKey !== '') {
                         $summaryUmuOtherColumnsByCode[$otherProductCodeKey] = [
-                            'qty_column' => $otherQtyColumnLetter,
-                            'uom_column' => $otherUomColumnLetter,
-                            'uom' => isset($otherData['uom']) ? (string)$otherData['uom'] : ''
+                            'qty_column' => $otherQtyColumnLetter
                         ];
                     }
                 }
@@ -1667,15 +1751,8 @@ if ($reportType === 'by_product') {
                     }
                     $pivotDateValue = $productPivotByDateUmu[$saleDate][$productCodeKey];
                     $qtyValue = isset($pivotDateValue['qty']) ? (float)$pivotDateValue['qty'] : 0.0;
-                    $uomValue = trim((string)(isset($pivotDateValue['uom']) ? $pivotDateValue['uom'] : ''));
-                    if ($uomValue === '') {
-                        $uomValue = trim((string)$columnMeta['uom']);
-                    }
                     if ($qtyValue != 0.0) {
                         $summaryUmuSheet->setCellValue($columnMeta['qty_column'] . $summaryUmuPivotRowPointer, $qtyValue);
-                    }
-                    if ($uomValue !== '') {
-                        $summaryUmuSheet->setCellValue($columnMeta['uom_column'] . $summaryUmuPivotRowPointer, $uomValue);
                     }
                 }
                 if ($summaryUmuFirstQtyColumnLetter !== '') {
@@ -1690,15 +1767,8 @@ if ($reportType === 'by_product') {
                     }
                     $otherPivotDateValue = $otherPivotByDateUmu[$saleDate][$otherProductCodeKey];
                     $otherQtyValue = isset($otherPivotDateValue['qty']) ? (float)$otherPivotDateValue['qty'] : 0.0;
-                    $otherUomValue = trim((string)(isset($otherPivotDateValue['uom']) ? $otherPivotDateValue['uom'] : ''));
-                    if ($otherUomValue === '') {
-                        $otherUomValue = trim((string)$otherColumnMeta['uom']);
-                    }
                     if ($otherQtyValue != 0.0) {
                         $summaryUmuSheet->setCellValue($otherColumnMeta['qty_column'] . $summaryUmuPivotRowPointer, $otherQtyValue);
-                    }
-                    if ($otherUomValue !== '') {
-                        $summaryUmuSheet->setCellValue($otherColumnMeta['uom_column'] . $summaryUmuPivotRowPointer, $otherUomValue);
                     }
                 }
                 $summaryUmuPivotRowPointer++;
@@ -1706,13 +1776,11 @@ if ($reportType === 'by_product') {
 
             foreach ($summaryUmuProductColumnsByCode as $columnMeta) {
                 $qtyColumnLetter = $columnMeta['qty_column'];
-                $uomColumnLetter = $columnMeta['uom_column'];
                 if ($lastSummaryUmuDetailRow >= $summaryUmuDataRow) {
                     $summaryUmuSheet->setCellValue("{$qtyColumnLetter}{$summaryUmuTotalRow}", "=SUM({$qtyColumnLetter}{$summaryUmuDataRow}:{$qtyColumnLetter}{$lastSummaryUmuDetailRow})");
                 } else {
                     $summaryUmuSheet->setCellValue("{$qtyColumnLetter}{$summaryUmuTotalRow}", 0);
                 }
-                $summaryUmuSheet->setCellValue("{$uomColumnLetter}{$summaryUmuTotalRow}", isset($columnMeta['uom']) ? (string)$columnMeta['uom'] : '');
             }
             if ($lastSummaryUmuDetailRow >= $summaryUmuDataRow) {
                 $summaryUmuSheet->setCellValue(
@@ -1724,19 +1792,18 @@ if ($reportType === 'by_product') {
             }
             foreach ($summaryUmuOtherColumnsByCode as $otherColumnMeta) {
                 $otherQtyColumnLetter = $otherColumnMeta['qty_column'];
-                $otherUomColumnLetter = $otherColumnMeta['uom_column'];
                 if ($lastSummaryUmuDetailRow >= $summaryUmuDataRow) {
                     $summaryUmuSheet->setCellValue("{$otherQtyColumnLetter}{$summaryUmuTotalRow}", "=SUM({$otherQtyColumnLetter}{$summaryUmuDataRow}:{$otherQtyColumnLetter}{$lastSummaryUmuDetailRow})");
                 } else {
                     $summaryUmuSheet->setCellValue("{$otherQtyColumnLetter}{$summaryUmuTotalRow}", 0);
                 }
-                $summaryUmuSheet->setCellValue("{$otherUomColumnLetter}{$summaryUmuTotalRow}", isset($otherColumnMeta['uom']) ? (string)$otherColumnMeta['uom'] : '');
             }
 
             $summaryUmuSheet->getStyle("{$summaryUmuPivotFirstColumnLetter}{$summaryUmuPivotTitleRow}:{$summaryUmuFinalLastColumnLetter}{$summaryUmuTotalRow}")
                 ->applyFromArray($borderStyle);
-            $summaryUmuSheet->getStyle("{$summaryUmuPivotFirstColumnLetter}{$summaryUmuPivotSubHeaderRow}:{$summaryUmuFinalLastColumnLetter}{$summaryUmuTotalRow}")
+            $summaryUmuSheet->getStyle("{$summaryUmuPivotFirstColumnLetter}{$summaryUmuPivotTitleRow}:{$summaryUmuFinalLastColumnLetter}{$summaryUmuPivotDescriptionRow}")
                 ->getAlignment()
+                ->setWrapText(true)
                 ->setHorizontal(Alignment::HORIZONTAL_CENTER)
                 ->setVertical(Alignment::VERTICAL_CENTER);
             $summaryUmuSheet->getStyle("{$summaryUmuPivotFirstColumnLetter}{$summaryUmuTotalRow}:{$summaryUmuFinalLastColumnLetter}{$summaryUmuTotalRow}")
@@ -1761,7 +1828,6 @@ if ($reportType === 'by_product') {
             }
         }
     }
-
     if ($summaryUmuCurrentRow >= $summaryUmuHeaderRow) {
         $summaryUmuSheet->getStyle("A{$summaryUmuHeaderRow}:I{$summaryUmuCurrentRow}")->applyFromArray($borderStyle);
     }
@@ -1810,3 +1876,5 @@ header('Cache-Control: max-age=0');
 $writer = new Xlsx($spreadsheet);
 $writer->save('php://output');
 exit;
+
+
