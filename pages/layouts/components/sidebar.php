@@ -135,6 +135,9 @@
                                         <a href="raw_sales_report.php" class="side-menu__item">Raw Sales Report</a>
                                     </li>
                                     <li class="slide">
+                                        <a href="customer_register_report.php" class="side-menu__item">Customer Register</a>
+                                    </li>
+                                    <li class="slide">
                                         <a href="todate_daily_sales.php" class="side-menu__item">To-Date Daily Sales</a>
                                     </li>
                                     <li class="slide">

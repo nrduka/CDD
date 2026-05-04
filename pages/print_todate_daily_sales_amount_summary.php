@@ -322,7 +322,7 @@ function enrichRegisterRowsWithOrderPayments($rows)
     return $rows;
 }
 
-function fetchToDateSummaryByDate($registerRows)
+function fetchToDateSummaryByDate($registerRows, $transactionMetricKey = null)
 {
     $totals = [];
     $transactionsPerDate = [];
@@ -353,9 +353,15 @@ function fetchToDateSummaryByDate($registerRows)
         $totals[$saleDate]['cash'] += isset($row['cash_once']) ? (float)$row['cash_once'] : 0.0;
         $totals[$saleDate]['on_account'] += isset($row['on_account_once']) ? (float)$row['on_account_once'] : 0.0;
 
-        $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
-        $orderKey = $orderNo !== '' ? $orderNo : '__ROW_' . $index;
-        $transactionsPerDate[$saleDate][$orderKey] = true;
+        $shouldCountTransaction = true;
+        if ($transactionMetricKey !== null) {
+            $shouldCountTransaction = isset($row[$transactionMetricKey]) && (float)$row[$transactionMetricKey] > 0.0;
+        }
+        if ($shouldCountTransaction) {
+            $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+            $orderKey = $orderNo !== '' ? $orderNo : '__ROW_' . $index;
+            $transactionsPerDate[$saleDate][$orderKey] = true;
+        }
     }
 
     foreach ($totals as $saleDate => &$values) {
@@ -1173,9 +1179,13 @@ $productPivotByDate = buildProductPivotByDate($registerRows);
 $otherPivotRows = buildOthersPivotRows($registerRows);
 $otherPivotByDate = buildOthersPivotByDate($registerRows);
 $cashMetricRows = mapRegisterRowsToMetric($registerRows, 'cash_allocated');
+$cashSummaryByDate = fetchToDateSummaryByDate($cashMetricRows, 'cash_once');
+$cashSummaryByDate = fillMissingSummaryDates($cashSummaryByDate, $startDate, $endDate);
 $cashProductPivotByDate = buildProductPivotByDate($cashMetricRows);
 $cashOtherPivotByDate = buildOthersPivotByDate($cashMetricRows);
 $onAccountMetricRows = mapRegisterRowsToMetric($registerRows, 'on_account_allocated');
+$onAccountSummaryByDate = fetchToDateSummaryByDate($onAccountMetricRows, 'on_account_once');
+$onAccountSummaryByDate = fillMissingSummaryDates($onAccountSummaryByDate, $startDate, $endDate);
 $onAccountProductPivotByDate = buildProductPivotByDate($onAccountMetricRows);
 $onAccountOtherPivotByDate = buildOthersPivotByDate($onAccountMetricRows);
 $totalSales = 0;
@@ -2840,7 +2850,7 @@ if ($reportType === 'by_product') {
         'Cash Summary',
         $rangeLabel,
         $generatedAt,
-        $summaryByDate,
+        $cashSummaryByDate,
         'cash',
         $productPivotRows,
         $cashProductPivotByDate,
@@ -2857,7 +2867,7 @@ if ($reportType === 'by_product') {
         'On Account Summary',
         $rangeLabel,
         $generatedAt,
-        $summaryByDate,
+        $onAccountSummaryByDate,
         'on_account',
         $productPivotRows,
         $onAccountProductPivotByDate,

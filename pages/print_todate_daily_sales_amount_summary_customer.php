@@ -156,6 +156,21 @@ function buildCustomerDisplayName($row)
     return trim((string)(isset($row['customer_code']) ? $row['customer_code'] : ''));
 }
 
+function buildSourceChannelLabel($row)
+{
+    $channel = trim((string)(isset($row['source_channel']) ? $row['source_channel'] : ''));
+    if ($channel !== '') {
+        return $channel;
+    }
+
+    $customerSource = trim((string)(isset($row['customer_source']) ? $row['customer_source'] : ''));
+    if ($customerSource !== '' && $customerSource !== '0') {
+        return 'SOURCE ' . $customerSource;
+    }
+
+    return 'UNASSIGNED';
+}
+
 function resolveProductTypeGroup($productDescription, $productCode)
 {
     $description = trim((string)$productDescription);
@@ -358,13 +373,16 @@ function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
                    c.storeName,
                    c.firstName,
                    c.middleName,
-                   c.lastName
+                   c.lastName,
+                   c.customer_source,
+                   sc.customer_channel AS source_channel
             FROM sales s
             LEFT JOIN ice_product p ON p.product_code = s.product_code
             LEFT JOIN customer_register c ON c.customer_code = s.customer_code
+            LEFT JOIN source_channel sc ON sc.customer_source = c.customer_source
             WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) BETWEEN ? AND ?
               AND (s.void_status IS NULL OR s.void_status = 0)
-            ORDER BY c.storeName, c.firstName, c.lastName,
+            ORDER BY c.customer_source, c.storeName, c.firstName, c.lastName,
                      COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created),
                      s.order_no, s.lineitem";
 
@@ -397,6 +415,8 @@ function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
                     'order_no' => isset($row['order_no']) ? (string)$row['order_no'] : '',
                     'customer_code' => isset($row['customer_code']) ? (string)$row['customer_code'] : '',
                     'customer_name' => buildCustomerDisplayName($row),
+                    'customer_source' => isset($row['customer_source']) ? (string)$row['customer_source'] : '',
+                    'source_channel' => buildSourceChannelLabel($row),
                     'date' => $dateLabel,
                     'qty' => isset($row['qty']) ? (float)$row['qty'] : 0.0,
                     'amount' => isset($row['amount']) ? (float)$row['amount'] : 0.0,
@@ -624,7 +644,7 @@ function mergePivotColumnsForUmu($basePivotRows, $umuPivotRows)
     return $merged;
 }
 
-function buildCustomerDateSummary($registerRows, $metricKey = 'qty')
+function buildCustomerDateSummary($registerRows, $metricKey = 'qty', $transactionMetricKey = null)
 {
     $customerBuckets = [];
 
@@ -638,6 +658,12 @@ function buildCustomerDateSummary($registerRows, $metricKey = 'qty')
         if ($customerName === '' && $customerCode !== 'UNASSIGNED') {
             $customerName = $customerCode;
         }
+        $sourceChannel = trim((string)(isset($row['source_channel']) ? $row['source_channel'] : ''));
+        if ($sourceChannel === '') {
+            $sourceChannel = 'UNASSIGNED';
+        }
+        $sourceSort = isset($row['customer_source']) && is_numeric($row['customer_source']) ? (int)$row['customer_source'] : 999999;
+        $sourceKey = $sourceSort . '|' . strtoupper($sourceChannel);
 
         $saleDate = trim((string)(isset($row['date']) ? $row['date'] : ''));
         if ($saleDate === '') {
@@ -651,9 +677,12 @@ function buildCustomerDateSummary($registerRows, $metricKey = 'qty')
         $pivotMeta = resolvePivotSection($row);
         $section = $pivotMeta['section'];
         $productKey = $pivotMeta['product_key'];
+        $bucketKey = $sourceKey . '|' . $customerCode;
 
-        if (!isset($customerBuckets[$customerCode])) {
-            $customerBuckets[$customerCode] = [
+        if (!isset($customerBuckets[$bucketKey])) {
+            $customerBuckets[$bucketKey] = [
+                'source_channel' => $sourceChannel,
+                'source_sort' => $sourceSort,
                 'customer_code' => $customerCode,
                 'customer_name' => $customerName,
                 'subtotal_qty' => 0.0,
@@ -664,22 +693,28 @@ function buildCustomerDateSummary($registerRows, $metricKey = 'qty')
             ];
         }
 
-        if ($customerBuckets[$customerCode]['customer_name'] === '' && $customerName !== '') {
-            $customerBuckets[$customerCode]['customer_name'] = $customerName;
+        if ($customerBuckets[$bucketKey]['customer_name'] === '' && $customerName !== '') {
+            $customerBuckets[$bucketKey]['customer_name'] = $customerName;
         }
 
-        $customerBuckets[$customerCode]['transaction_orders'][$orderKey] = true;
-        $customerBuckets[$customerCode]['subtotal_qty'] += $qty;
+        $shouldCountTransaction = true;
+        if ($transactionMetricKey !== null) {
+            $shouldCountTransaction = isset($row[$transactionMetricKey]) && (float)$row[$transactionMetricKey] > 0.0;
+        }
+        if ($shouldCountTransaction) {
+            $customerBuckets[$bucketKey]['transaction_orders'][$orderKey] = true;
+        }
+        $customerBuckets[$bucketKey]['subtotal_qty'] += $qty;
 
         if ($section !== '' && $productKey !== '') {
-            if (!isset($customerBuckets[$customerCode]['subtotal_products'][$section][$productKey])) {
-                $customerBuckets[$customerCode]['subtotal_products'][$section][$productKey] = 0.0;
+            if (!isset($customerBuckets[$bucketKey]['subtotal_products'][$section][$productKey])) {
+                $customerBuckets[$bucketKey]['subtotal_products'][$section][$productKey] = 0.0;
             }
-            $customerBuckets[$customerCode]['subtotal_products'][$section][$productKey] += $qty;
+            $customerBuckets[$bucketKey]['subtotal_products'][$section][$productKey] += $qty;
         }
 
-        if (!isset($customerBuckets[$customerCode]['dates'][$saleDate])) {
-            $customerBuckets[$customerCode]['dates'][$saleDate] = [
+        if (!isset($customerBuckets[$bucketKey]['dates'][$saleDate])) {
+            $customerBuckets[$bucketKey]['dates'][$saleDate] = [
                 'sale_date' => $saleDate,
                 'transaction_count' => 0,
                 'qty' => 0.0,
@@ -688,14 +723,16 @@ function buildCustomerDateSummary($registerRows, $metricKey = 'qty')
             ];
         }
 
-        $customerBuckets[$customerCode]['dates'][$saleDate]['transaction_orders'][$orderKey] = true;
-        $customerBuckets[$customerCode]['dates'][$saleDate]['qty'] += $qty;
+        if ($shouldCountTransaction) {
+            $customerBuckets[$bucketKey]['dates'][$saleDate]['transaction_orders'][$orderKey] = true;
+        }
+        $customerBuckets[$bucketKey]['dates'][$saleDate]['qty'] += $qty;
 
         if ($section !== '' && $productKey !== '') {
-            if (!isset($customerBuckets[$customerCode]['dates'][$saleDate]['products'][$section][$productKey])) {
-                $customerBuckets[$customerCode]['dates'][$saleDate]['products'][$section][$productKey] = 0.0;
+            if (!isset($customerBuckets[$bucketKey]['dates'][$saleDate]['products'][$section][$productKey])) {
+                $customerBuckets[$bucketKey]['dates'][$saleDate]['products'][$section][$productKey] = 0.0;
             }
-            $customerBuckets[$customerCode]['dates'][$saleDate]['products'][$section][$productKey] += $qty;
+            $customerBuckets[$bucketKey]['dates'][$saleDate]['products'][$section][$productKey] += $qty;
         }
     }
 
@@ -731,6 +768,17 @@ function buildCustomerDateSummary($registerRows, $metricKey = 'qty')
     unset($customerRow);
 
     usort($customerRows, function ($left, $right) {
+        $leftSourceSort = isset($left['source_sort']) ? (int)$left['source_sort'] : 999999;
+        $rightSourceSort = isset($right['source_sort']) ? (int)$right['source_sort'] : 999999;
+        if ($leftSourceSort !== $rightSourceSort) {
+            return $leftSourceSort < $rightSourceSort ? -1 : 1;
+        }
+
+        $sourceCompare = strcasecmp((string)$left['source_channel'], (string)$right['source_channel']);
+        if ($sourceCompare !== 0) {
+            return $sourceCompare;
+        }
+
         $codeCompare = strcasecmp((string)$left['customer_code'], (string)$right['customer_code']);
         if ($codeCompare !== 0) {
             return $codeCompare;
@@ -964,6 +1012,7 @@ function writeCustomerSummarySheet(
     }
 
     $othersFirstColumnIndex = null;
+    $othersLastProductColumnIndex = null;
     foreach ($otherPivotRows as $otherData) {
         $productCode = trim((string)(isset($otherData['product_code']) ? $otherData['product_code'] : ''));
         if ($productCode === '') {
@@ -1079,6 +1128,117 @@ function writeCustomerSummarySheet(
 
     $currentRow = $dataStartRow;
     $lineNumber = 1;
+    $currentSourceKey = '';
+    $currentSourceLabel = '';
+    $sourceTransactions = 0;
+    $sourceQty = 0.0;
+    $sourceCash = 0.0;
+    $sourceOnAccount = 0.0;
+    $sourceProductTotals = ['ice' => [], 'others' => []];
+    $sourceLabelRows = [];
+
+    $resetSourceTotals = function () use (&$sourceTransactions, &$sourceQty, &$sourceCash, &$sourceOnAccount, &$sourceProductTotals, $productColumnsBySection) {
+        $sourceTransactions = 0;
+        $sourceQty = 0.0;
+        $sourceCash = 0.0;
+        $sourceOnAccount = 0.0;
+        $sourceProductTotals = ['ice' => [], 'others' => []];
+        foreach ($productColumnsBySection['ice'] as $productKey => $meta) {
+            $sourceProductTotals['ice'][$productKey] = 0.0;
+        }
+        foreach ($productColumnsBySection['others'] as $productKey => $meta) {
+            $sourceProductTotals['others'][$productKey] = 0.0;
+        }
+    };
+
+    $writeSourceTotalRow = function () use (
+        $sheet,
+        &$currentRow,
+        &$currentSourceLabel,
+        &$sourceTransactions,
+        &$sourceQty,
+        &$sourceCash,
+        &$sourceOnAccount,
+        &$sourceProductTotals,
+        &$sourceLabelRows,
+        $productColumnsBySection,
+        $iceTypeSubtotalColumns,
+        $iceTotalColumnLetter,
+        $iceFirstColumnIndex,
+        $iceLastProductColumnIndex,
+        $othersSubtotalColumnLetter,
+        $othersFirstColumnIndex,
+        $othersLastProductColumnIndex,
+        $grandTotalColumnLetter,
+        $showPaymentColumns,
+        $cashColumnLetter,
+        $onAccountColumnLetter,
+        $lastColumnLetter
+    ) {
+        $sheet->setCellValue("A{$currentRow}", 'TOTAL - ' . $currentSourceLabel);
+        $sheet->setCellValue("E{$currentRow}", $sourceTransactions);
+        $sheet->setCellValue("F{$currentRow}", $sourceQty);
+        if ($showPaymentColumns) {
+            $sheet->setCellValue($cashColumnLetter . $currentRow, $sourceCash);
+            $sheet->setCellValue($onAccountColumnLetter . $currentRow, $sourceOnAccount);
+        }
+
+        foreach (['ice', 'others'] as $sectionKey) {
+            foreach ($productColumnsBySection[$sectionKey] as $productKey => $columnMeta) {
+                $sheet->setCellValue(
+                    $columnMeta['column'] . $currentRow,
+                    isset($sourceProductTotals[$sectionKey][$productKey]) ? (float)$sourceProductTotals[$sectionKey][$productKey] : 0.0
+                );
+            }
+        }
+        foreach ($iceTypeSubtotalColumns as $typeSubtotalColumn) {
+            $sheet->setCellValue(
+                $typeSubtotalColumn['column'] . $currentRow,
+                "=SUM({$typeSubtotalColumn['start_column']}{$currentRow}:{$typeSubtotalColumn['end_column']}{$currentRow})"
+            );
+        }
+        if ($iceTotalColumnLetter !== '') {
+            if (!empty($iceTypeSubtotalColumns)) {
+                $iceSubtotalRefs = [];
+                foreach ($iceTypeSubtotalColumns as $typeSubtotalColumn) {
+                    $iceSubtotalRefs[] = $typeSubtotalColumn['column'] . $currentRow;
+                }
+                $sheet->setCellValue($iceTotalColumnLetter . $currentRow, '=' . implode('+', $iceSubtotalRefs));
+            } elseif ($iceFirstColumnIndex !== null && $iceLastProductColumnIndex !== null) {
+                $iceFirstLetter = columnIndexToLetter($iceFirstColumnIndex);
+                $iceLastLetter = columnIndexToLetter($iceLastProductColumnIndex);
+                $sheet->setCellValue($iceTotalColumnLetter . $currentRow, "=SUM({$iceFirstLetter}{$currentRow}:{$iceLastLetter}{$currentRow})");
+            } else {
+                $sheet->setCellValue($iceTotalColumnLetter . $currentRow, 0);
+            }
+        }
+        if ($othersSubtotalColumnLetter !== '') {
+            $othersFirstLetter = columnIndexToLetter($othersFirstColumnIndex);
+            $othersLastLetter = columnIndexToLetter($othersLastProductColumnIndex);
+            $sheet->setCellValue($othersSubtotalColumnLetter . $currentRow, "=SUM({$othersFirstLetter}{$currentRow}:{$othersLastLetter}{$currentRow})");
+        }
+        $sheet->setCellValue(
+            $grandTotalColumnLetter . $currentRow,
+            $othersSubtotalColumnLetter !== '' && $iceTotalColumnLetter !== ''
+                ? "={$iceTotalColumnLetter}{$currentRow}+{$othersSubtotalColumnLetter}{$currentRow}"
+                : ($iceTotalColumnLetter !== '' ? "={$iceTotalColumnLetter}{$currentRow}" : ($othersSubtotalColumnLetter !== '' ? "={$othersSubtotalColumnLetter}{$currentRow}" : '=0'))
+        );
+
+        $sheet->getStyle("A{$currentRow}:{$lastColumnLetter}{$currentRow}")
+            ->getFont()
+            ->setBold(true);
+        $sourceLabelRows[] = $currentRow;
+        $currentRow++;
+    };
+    $writeSourceHeaderRow = function () use ($sheet, &$currentRow, &$currentSourceLabel, &$sourceLabelRows, $lastColumnLetter) {
+        $sheet->setCellValue("A{$currentRow}", $currentSourceLabel);
+        $sheet->getStyle("A{$currentRow}:{$lastColumnLetter}{$currentRow}")
+            ->getFont()
+            ->setBold(true);
+        $sourceLabelRows[] = $currentRow;
+        $currentRow++;
+    };
+    $resetSourceTotals();
 
     if (empty($customerSummaryRows)) {
         safeMergeCells($sheet, "A{$currentRow}:{$lastColumnLetter}{$currentRow}", $mergeRegistry);
@@ -1092,6 +1252,17 @@ function writeCustomerSummarySheet(
         foreach ($customerSummaryRows as $customerRow) {
             $customerCode = isset($customerRow['customer_code']) ? (string)$customerRow['customer_code'] : '';
             $customerName = isset($customerRow['customer_name']) ? (string)$customerRow['customer_name'] : '';
+            $sourceChannel = isset($customerRow['source_channel']) ? (string)$customerRow['source_channel'] : '';
+            $sourceKey = isset($customerRow['source_sort']) ? (string)$customerRow['source_sort'] . '|' . strtoupper($sourceChannel) : strtoupper($sourceChannel);
+            if ($currentSourceKey !== '' && $sourceKey !== $currentSourceKey) {
+                $writeSourceTotalRow();
+                $resetSourceTotals();
+            }
+            if ($currentSourceKey === '' || $sourceKey !== $currentSourceKey) {
+                $currentSourceKey = $sourceKey;
+                $currentSourceLabel = $sourceChannel !== '' ? $sourceChannel : 'UNASSIGNED';
+                $writeSourceHeaderRow();
+            }
             $customerDataStartRow = $currentRow;
 
             foreach ($customerRow['dates'] as $dateRow) {
@@ -1119,6 +1290,8 @@ function writeCustomerSummarySheet(
                     $sheet->setCellValue($onAccountColumnLetter . $currentRow, $onAccountValue);
                     $grandCash += $cashValue;
                     $grandOnAccount += $onAccountValue;
+                    $sourceCash += $cashValue;
+                    $sourceOnAccount += $onAccountValue;
                 }
 
                 foreach (['ice', 'others'] as $sectionKey) {
@@ -1134,6 +1307,7 @@ function writeCustomerSummarySheet(
                         if ($qtyValue != 0.0) {
                             $sheet->setCellValue($columnMeta['column'] . $currentRow, $qtyValue);
                             $grandProductTotals[$sectionKey][$productKey] += $qtyValue;
+                            $sourceProductTotals[$sectionKey][$productKey] += $qtyValue;
                         }
                     }
                 }
@@ -1173,6 +1347,8 @@ function writeCustomerSummarySheet(
 
                 $grandTransactions += $transactionCount;
                 $grandQty += $totalQty;
+                $sourceTransactions += $transactionCount;
+                $sourceQty += $totalQty;
 
                 $currentRow++;
                 $lineNumber++;
@@ -1269,6 +1445,9 @@ function writeCustomerSummarySheet(
 
             $currentRow++;
         }
+        if ($currentSourceKey !== '') {
+            $writeSourceTotalRow();
+        }
     }
 
     $sheet->setCellValue("B{$currentRow}", 'GRAND TOTAL');
@@ -1345,6 +1524,12 @@ function writeCustomerSummarySheet(
         ->getAlignment()
         ->setHorizontal(Alignment::HORIZONTAL_CENTER)
         ->setVertical(Alignment::VERTICAL_CENTER);
+    foreach ($sourceLabelRows as $sourceLabelRow) {
+        $sheet->getStyle("A{$sourceLabelRow}")
+            ->getAlignment()
+            ->setHorizontal(Alignment::HORIZONTAL_LEFT)
+            ->setVertical(Alignment::VERTICAL_CENTER);
+    }
     $sheet->getStyle("B{$headerRow}:C{$lastDataRow}")
         ->getAlignment()
         ->setHorizontal(Alignment::HORIZONTAL_LEFT)
@@ -1367,8 +1552,8 @@ $registerRows = fetchToDateRegisterRows($mysqli, $startDate, $endDate);
 $registerRows = enrichRegisterRowsWithOrderPayments($registerRows);
 
 $customerSummaryRows = buildCustomerDateSummary($registerRows, 'amount');
-$customerSummaryCashRows = buildCustomerDateSummary($registerRows, 'cash_allocated');
-$customerSummaryOnAccountRows = buildCustomerDateSummary($registerRows, 'on_account_allocated');
+$customerSummaryCashRows = buildCustomerDateSummary($registerRows, 'cash_allocated', 'cash_once');
+$customerSummaryOnAccountRows = buildCustomerDateSummary($registerRows, 'on_account_allocated', 'on_account_once');
 $customerCashByDate = buildCustomerDateValueMap($customerSummaryCashRows);
 $customerOnAccountByDate = buildCustomerDateValueMap($customerSummaryOnAccountRows);
 $icePivotRows = buildPivotColumns($registerRows, 'ice');

@@ -36,7 +36,7 @@ $today = date('Y-m-d');
 $startInput = isset($_GET['start']) ? trim((string)$_GET['start']) : '';
 $endInput = isset($_GET['end']) ? trim((string)$_GET['end']) : '';
 $reportTypeInput = isset($_GET['report_type']) ? trim((string)$_GET['report_type']) : '';
-$reportType = in_array($reportTypeInput, ['by_product', 'by_customer'], true) ? $reportTypeInput : 'by_product';
+$reportType = in_array($reportTypeInput, ['by_product', 'by_customer', 'by_source_channel'], true) ? $reportTypeInput : 'by_product';
 
 $startDate = $startInput !== '' ? $startInput : $today;
 $endDate = $endInput !== '' ? $endInput : $today;
@@ -129,6 +129,21 @@ function buildCustomerDisplayName($row)
     }
 
     return trim((string)(isset($row['customer_code']) ? $row['customer_code'] : ''));
+}
+
+function buildSourceChannelLabel($row)
+{
+    $channel = trim((string)(isset($row['source_channel']) ? $row['source_channel'] : ''));
+    if ($channel !== '') {
+        return $channel;
+    }
+
+    $customerSource = trim((string)(isset($row['customer_source']) ? $row['customer_source'] : ''));
+    if ($customerSource !== '' && $customerSource !== '0') {
+        return 'SOURCE ' . $customerSource;
+    }
+
+    return 'UNASSIGNED';
 }
 
 function resolveProductTypeGroup($productDescription, $productCode)
@@ -241,13 +256,18 @@ function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
                    c.storeName,
                    c.firstName,
                    c.middleName,
-                   c.lastName
+                   c.lastName,
+                   c.customer_source,
+                   sc.customer_channel AS source_channel
              FROM sales s
              LEFT JOIN ice_product p ON p.product_code = s.product_code
              LEFT JOIN customer_register c ON c.customer_code = s.customer_code
+             LEFT JOIN source_channel sc ON sc.customer_source = c.customer_source
              WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) BETWEEN ? AND ?
               AND (s.void_status IS NULL OR s.void_status = 0)
-             ORDER BY COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created), s.order_no, s.lineitem";
+             ORDER BY c.customer_source, c.storeName, c.firstName, c.lastName,
+                      COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created),
+                      s.order_no, s.lineitem";
 
     $stmt = $mysqli->prepare($sql);
     if ($stmt) {
@@ -289,6 +309,8 @@ function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
                     'order_no' => isset($row['order_no']) ? (string)$row['order_no'] : '',
                     'customer_code' => isset($row['customer_code']) ? (string)$row['customer_code'] : '',
                     'customer_name' => buildCustomerDisplayName($row),
+                    'customer_source' => isset($row['customer_source']) ? (string)$row['customer_source'] : '',
+                    'source_channel' => buildSourceChannelLabel($row),
                     'qty' => isset($row['qty']) ? (float)$row['qty'] : 0.0,
                     'unit_price' => isset($row['unit_price']) ? (float)$row['unit_price'] : 0.0,
                     'amount' => $amount,
@@ -480,6 +502,93 @@ function buildProductPivotByDate($registerRows)
     return $pivotByDate;
 }
 
+function buildSourceChannelProductSummary($registerRows)
+{
+    $sourceRows = [];
+
+    foreach ($registerRows as $index => $row) {
+        $sourceChannel = trim((string)(isset($row['source_channel']) ? $row['source_channel'] : ''));
+        if ($sourceChannel === '') {
+            $sourceChannel = 'UNASSIGNED';
+        }
+        $sourceSort = isset($row['customer_source']) && is_numeric($row['customer_source']) ? (int)$row['customer_source'] : 999999;
+        $sourceKey = $sourceSort . '|' . strtoupper($sourceChannel);
+
+        if (!isset($sourceRows[$sourceKey])) {
+            $sourceRows[$sourceKey] = [
+                'source_channel' => $sourceChannel,
+                'source_sort' => $sourceSort,
+                'transaction_orders' => [],
+                'qty' => 0.0,
+                'amount' => 0.0,
+                'cash' => 0.0,
+                'on_account' => 0.0,
+                'products' => []
+            ];
+        }
+
+        $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+        $orderKey = $orderNo !== '' ? $orderNo : '__ROW_' . $index;
+        $sourceRows[$sourceKey]['transaction_orders'][$orderKey] = true;
+
+        $sourceRows[$sourceKey]['qty'] += isset($row['qty']) ? (float)$row['qty'] : 0.0;
+        $sourceRows[$sourceKey]['amount'] += isset($row['amount']) ? (float)$row['amount'] : 0.0;
+        $sourceRows[$sourceKey]['cash'] += isset($row['cash_once']) ? (float)$row['cash_once'] : 0.0;
+        $sourceRows[$sourceKey]['on_account'] += isset($row['on_account_once']) ? (float)$row['on_account_once'] : 0.0;
+
+        $productCode = strtoupper(trim((string)(isset($row['product_code']) ? $row['product_code'] : '')));
+        if ($productCode !== '') {
+            if (!isset($sourceRows[$sourceKey]['products'][$productCode])) {
+                $sourceRows[$sourceKey]['products'][$productCode] = 0.0;
+            }
+            $sourceRows[$sourceKey]['products'][$productCode] += isset($row['qty']) ? (float)$row['qty'] : 0.0;
+        }
+    }
+
+    foreach ($sourceRows as &$sourceRow) {
+        $sourceRow['transaction_count'] = count($sourceRow['transaction_orders']);
+        unset($sourceRow['transaction_orders']);
+    }
+    unset($sourceRow);
+
+    $sourceRows = array_values($sourceRows);
+    usort($sourceRows, function ($left, $right) {
+        $leftSourceSort = isset($left['source_sort']) ? (int)$left['source_sort'] : 999999;
+        $rightSourceSort = isset($right['source_sort']) ? (int)$right['source_sort'] : 999999;
+        if ($leftSourceSort !== $rightSourceSort) {
+            return $leftSourceSort < $rightSourceSort ? -1 : 1;
+        }
+
+        return strcasecmp((string)$left['source_channel'], (string)$right['source_channel']);
+    });
+
+    return $sourceRows;
+}
+
+function buildPivotTypeHeaderGroups($productPivotRows)
+{
+    $groups = [];
+    foreach ($productPivotRows as $pivotData) {
+        $productTypeLabel = trim((string)(isset($pivotData['product_type']) ? $pivotData['product_type'] : ''));
+        if ($productTypeLabel === '') {
+            $productTypeLabel = 'UNCLASSIFIED';
+        }
+        $productTypeKey = strtoupper($productTypeLabel);
+        if (empty($groups) || $groups[count($groups) - 1]['key'] !== $productTypeKey) {
+            $groups[] = [
+                'key' => $productTypeKey,
+                'label' => $productTypeLabel,
+                'colspan' => 1
+            ];
+            continue;
+        }
+
+        $groups[count($groups) - 1]['colspan']++;
+    }
+
+    return $groups;
+}
+
 $reportRangeLabel = 'from ' . date('F d', strtotime($startDate)) . ' to ' . date('d, Y', strtotime($endDate));
 $transactionCount = count($uniqueOrders);
 $dayCount = $startObject && $endObject ? $startObject->diff($endObject)->days + 1 : 1;
@@ -490,11 +599,18 @@ $summaryByDate = fetchToDateSummaryByDate($amountMetricRows);
 $summaryByDate = fillMissingSummaryDates($summaryByDate, $startDate, $endDate);
 $productPivotRows = [];
 $productPivotByDate = [];
-if ($reportType === 'by_product') {
+if ($reportType === 'by_product' || $reportType === 'by_source_channel') {
     $productPivotRows = buildProductPivotRows($amountMetricRows);
     $productPivotByDate = buildProductPivotByDate($amountMetricRows);
 }
+$sourceChannelSummaryRows = [];
+$sourceChannelPivotTypeGroups = [];
+if ($reportType === 'by_source_channel') {
+    $sourceChannelSummaryRows = buildSourceChannelProductSummary($amountMetricRows);
+    $sourceChannelPivotTypeGroups = buildPivotTypeHeaderGroups($productPivotRows);
+}
 $customerSummaryRows = [];
+$customerSourceGroups = [];
 if ($reportType === 'by_customer') {
     $customerBuckets = [];
     foreach ($amountMetricRows as $row) {
@@ -507,9 +623,18 @@ if ($reportType === 'by_customer') {
         if ($customerName === '' && $customerCode !== 'UNASSIGNED') {
             $customerName = $customerCode;
         }
+        $sourceChannel = trim((string)(isset($row['source_channel']) ? $row['source_channel'] : ''));
+        if ($sourceChannel === '') {
+            $sourceChannel = 'UNASSIGNED';
+        }
+        $sourceSort = isset($row['customer_source']) && is_numeric($row['customer_source']) ? (int)$row['customer_source'] : 999999;
+        $sourceKey = $sourceSort . '|' . strtoupper($sourceChannel);
+        $bucketKey = $sourceKey . '|' . $customerCode;
 
-        if (!isset($customerBuckets[$customerCode])) {
-            $customerBuckets[$customerCode] = [
+        if (!isset($customerBuckets[$bucketKey])) {
+            $customerBuckets[$bucketKey] = [
+                'source_channel' => $sourceChannel,
+                'source_sort' => $sourceSort,
                 'customer_code' => $customerCode,
                 'customer_name' => $customerName,
                 'transaction_orders' => [],
@@ -520,19 +645,19 @@ if ($reportType === 'by_customer') {
             ];
         }
 
-        if ($customerBuckets[$customerCode]['customer_name'] === '' && $customerName !== '') {
-            $customerBuckets[$customerCode]['customer_name'] = $customerName;
+        if ($customerBuckets[$bucketKey]['customer_name'] === '' && $customerName !== '') {
+            $customerBuckets[$bucketKey]['customer_name'] = $customerName;
         }
 
         $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
         if ($orderNo !== '') {
-            $customerBuckets[$customerCode]['transaction_orders'][$orderNo] = true;
+            $customerBuckets[$bucketKey]['transaction_orders'][$orderNo] = true;
         }
 
-        $customerBuckets[$customerCode]['qty'] += isset($row['qty']) ? (float)$row['qty'] : 0.0;
-        $customerBuckets[$customerCode]['amount'] += isset($row['amount']) ? (float)$row['amount'] : 0.0;
-        $customerBuckets[$customerCode]['cash'] += isset($row['cash_once']) ? (float)$row['cash_once'] : 0.0;
-        $customerBuckets[$customerCode]['on_account'] += isset($row['on_account_once']) ? (float)$row['on_account_once'] : 0.0;
+        $customerBuckets[$bucketKey]['qty'] += isset($row['qty']) ? (float)$row['qty'] : 0.0;
+        $customerBuckets[$bucketKey]['amount'] += isset($row['amount']) ? (float)$row['amount'] : 0.0;
+        $customerBuckets[$bucketKey]['cash'] += isset($row['cash_once']) ? (float)$row['cash_once'] : 0.0;
+        $customerBuckets[$bucketKey]['on_account'] += isset($row['on_account_once']) ? (float)$row['on_account_once'] : 0.0;
     }
 
     foreach ($customerBuckets as $bucket) {
@@ -545,6 +670,17 @@ if ($reportType === 'by_customer') {
     }
 
     usort($customerSummaryRows, function ($left, $right) {
+        $leftSourceSort = isset($left['source_sort']) ? (int)$left['source_sort'] : 999999;
+        $rightSourceSort = isset($right['source_sort']) ? (int)$right['source_sort'] : 999999;
+        if ($leftSourceSort !== $rightSourceSort) {
+            return $leftSourceSort < $rightSourceSort ? -1 : 1;
+        }
+
+        $sourceCompare = strcasecmp((string)$left['source_channel'], (string)$right['source_channel']);
+        if ($sourceCompare !== 0) {
+            return $sourceCompare;
+        }
+
         $codeCompare = strcasecmp((string)$left['customer_code'], (string)$right['customer_code']);
         if ($codeCompare !== 0) {
             return $codeCompare;
@@ -552,6 +688,34 @@ if ($reportType === 'by_customer') {
 
         return strcasecmp((string)$left['customer_name'], (string)$right['customer_name']);
     });
+
+    foreach ($customerSummaryRows as $row) {
+        $sourceChannel = trim((string)(isset($row['source_channel']) ? $row['source_channel'] : ''));
+        if ($sourceChannel === '') {
+            $sourceChannel = 'UNASSIGNED';
+        }
+        $sourceSort = isset($row['source_sort']) ? (int)$row['source_sort'] : 999999;
+        $sourceKey = $sourceSort . '|' . strtoupper($sourceChannel);
+        if (!isset($customerSourceGroups[$sourceKey])) {
+            $customerSourceGroups[$sourceKey] = [
+                'source_channel' => $sourceChannel,
+                'source_sort' => $sourceSort,
+                'rows' => [],
+                'transaction_count' => 0,
+                'qty' => 0.0,
+                'amount' => 0.0,
+                'cash' => 0.0,
+                'on_account' => 0.0
+            ];
+        }
+
+        $customerSourceGroups[$sourceKey]['rows'][] = $row;
+        $customerSourceGroups[$sourceKey]['transaction_count'] += isset($row['transaction_count']) ? (int)$row['transaction_count'] : 0;
+        $customerSourceGroups[$sourceKey]['qty'] += isset($row['qty']) ? (float)$row['qty'] : 0.0;
+        $customerSourceGroups[$sourceKey]['amount'] += isset($row['amount']) ? (float)$row['amount'] : 0.0;
+        $customerSourceGroups[$sourceKey]['cash'] += isset($row['cash']) ? (float)$row['cash'] : 0.0;
+        $customerSourceGroups[$sourceKey]['on_account'] += isset($row['on_account']) ? (float)$row['on_account'] : 0.0;
+    }
 }
 $reportMeta = [
     'start_date' => $startDate,
@@ -566,6 +730,8 @@ $reportMeta = [
 ];
 if ($reportType === 'by_customer') {
     $reportMeta['records'] = count($customerSummaryRows);
+} elseif ($reportType === 'by_source_channel') {
+    $reportMeta['records'] = count($sourceChannelSummaryRows);
 } elseif ($reportType === 'by_product') {
     $reportMeta['records'] = count($summaryByDate);
 }
@@ -648,6 +814,12 @@ ob_start();
         min-width: 1600px;
         white-space: nowrap;
     }
+    .todate-daily-sales-table tr.source-channel-row td {
+        background-color: #eef2ff;
+    }
+    .todate-daily-sales-table tr.source-channel-subtotal td {
+        background-color: #f3f4f6;
+    }
 </style>
 <?php
 $styles = ob_get_clean();
@@ -677,15 +849,22 @@ ob_start();
                         <select id="report-type" name="report_type" class="form-select">
                             <option value="by_product" <?php echo $reportMeta['report_type'] === 'by_product' ? 'selected' : ''; ?>>By Product</option>
                             <option value="by_customer" <?php echo $reportMeta['report_type'] === 'by_customer' ? 'selected' : ''; ?>>By Customer</option>
+                            <option value="by_source_channel" <?php echo $reportMeta['report_type'] === 'by_source_channel' ? 'selected' : ''; ?>>By Source Channel</option>
                         </select>
                     </div>
                     <div class="col-auto">
                         <button type="submit" class="btn btn-primary">View</button>
                     </div>
                     <div class="col-auto">
-                        <?php $exportPrintPage = $reportMeta['report_type'] === 'by_customer'
-                            ? 'print_todate_daily_sales_amount_summary_customer.php'
-                            : 'print_todate_daily_sales_amount_summary.php'; ?>
+                        <?php
+                        if ($reportMeta['report_type'] === 'by_customer') {
+                            $exportPrintPage = 'print_todate_daily_sales_amount_summary_customer.php';
+                        } elseif ($reportMeta['report_type'] === 'by_source_channel') {
+                            $exportPrintPage = 'print_todate_daily_sales_amount_summary_source_channel.php';
+                        } else {
+                            $exportPrintPage = 'print_todate_daily_sales_amount_summary.php';
+                        }
+                        ?>
                         <a class="btn btn-outline-secondary" href="<?php echo $exportPrintPage; ?>?start=<?php echo urlencode($reportMeta['start_date']); ?>&end=<?php echo urlencode($reportMeta['end_date']); ?>&amp;report_type=<?php echo urlencode($reportMeta['report_type']); ?>">
                             Export Excel
                         </a>
@@ -750,31 +929,157 @@ ob_start();
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <?php foreach ($customerSummaryRows as $index => $row): ?>
-                                        <?php
-                                        $summaryTotalTransactions += (int)$row['transaction_count'];
-                                        $summaryTotalAmount += (float)$row['amount'];
-                                        $summaryTotalCash += (float)$row['cash'];
-                                        $summaryTotalOnAccount += (float)$row['on_account'];
-                                        ?>
-                                        <tr>
-                                            <td class="text-center"><?php echo $index + 1; ?></td>
-                                            <td><?php echo htmlspecialchars($row['customer_code']); ?></td>
-                                            <td><?php echo htmlspecialchars($row['customer_name']); ?></td>
-                                            <td class="text-end"><?php echo number_format($row['transaction_count']); ?></td>
-                                            <td class="text-end"><?php echo number_format($row['amount'], 2); ?></td>
-                                            <td class="text-end"><?php echo number_format($row['cash'], 2); ?></td>
-                                            <td class="text-end"><?php echo number_format($row['on_account'], 2); ?></td>
+                                    <?php $customerLineNumber = 1; ?>
+                                    <?php foreach ($customerSourceGroups as $sourceGroup): ?>
+                                        <tr class="fw-semibold source-channel-row">
+                                            <td><?php echo htmlspecialchars($sourceGroup['source_channel']); ?></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td class="text-end"></td>
+                                            <td class="text-end"></td>
+                                            <td class="text-end"></td>
+                                            <td class="text-end"></td>
+                                        </tr>
+                                        <?php foreach ($sourceGroup['rows'] as $row): ?>
+                                            <?php
+                                            $summaryTotalTransactions += (int)$row['transaction_count'];
+                                            $summaryTotalAmount += (float)$row['amount'];
+                                            $summaryTotalCash += (float)$row['cash'];
+                                            $summaryTotalOnAccount += (float)$row['on_account'];
+                                            ?>
+                                            <tr>
+                                                <td class="text-center"><?php echo $customerLineNumber++; ?></td>
+                                                <td><?php echo htmlspecialchars($row['customer_code']); ?></td>
+                                                <td><?php echo htmlspecialchars($row['customer_name']); ?></td>
+                                                <td class="text-end"><?php echo number_format($row['transaction_count']); ?></td>
+                                                <td class="text-end"><?php echo number_format($row['amount'], 2); ?></td>
+                                                <td class="text-end"><?php echo number_format($row['cash'], 2); ?></td>
+                                                <td class="text-end"><?php echo number_format($row['on_account'], 2); ?></td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                        <tr class="fw-semibold source-channel-subtotal">
+                                            <td>TOTAL - <?php echo htmlspecialchars($sourceGroup['source_channel']); ?></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td class="text-end"><?php echo number_format($sourceGroup['transaction_count']); ?></td>
+                                            <td class="text-end"><?php echo number_format($sourceGroup['amount'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($sourceGroup['cash'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format($sourceGroup['on_account'], 2); ?></td>
                                         </tr>
                                     <?php endforeach; ?>
                                 </tbody>
                                 <tfoot>
                                     <tr class="fw-semibold">
-                                        <td colspan="3" class="text-end">TOTAL</td>
+                                        <td colspan="3" class="text-end">GRAND TOTAL</td>
                                         <td class="text-end"><?php echo number_format($summaryTotalTransactions); ?></td>
                                         <td class="text-end"><?php echo number_format($summaryTotalAmount, 2); ?></td>
                                         <td class="text-end"><?php echo number_format($summaryTotalCash, 2); ?></td>
                                         <td class="text-end"><?php echo number_format($summaryTotalOnAccount, 2); ?></td>
+                                    </tr>
+                                </tfoot>
+                            </table>
+                        </div>
+                    <?php elseif ($reportMeta['report_type'] === 'by_source_channel'): ?>
+                        <div class="table-responsive todate-daily-sales-table">
+                            <table id="todate-daily-sales-table" class="table table-striped align-middle mb-0 w-100">
+                                <thead>
+                                    <?php if (!empty($productPivotRows)): ?>
+                                        <tr class="daily-register-head-bottom text-center align-middle">
+                                            <th rowspan="3">No.</th>
+                                            <th rowspan="3">Source Channel</th>
+                                            <th rowspan="3" class="text-end">Transactions</th>
+                                            <th rowspan="3" class="text-end">Total Amount</th>
+                                            <th rowspan="3" class="text-end">Cash</th>
+                                            <th rowspan="3" class="text-end">On Account</th>
+                                            <th colspan="<?php echo count($productPivotRows); ?>" class="text-center">ICE PRODUCTS</th>
+                                        </tr>
+                                        <tr class="daily-register-head-bottom text-center align-middle">
+                                            <?php foreach ($sourceChannelPivotTypeGroups as $typeGroup): ?>
+                                                <th colspan="<?php echo (int)$typeGroup['colspan']; ?>"><?php echo htmlspecialchars($typeGroup['label']); ?></th>
+                                            <?php endforeach; ?>
+                                        </tr>
+                                        <tr class="daily-register-head-bottom text-center align-middle">
+                                            <?php foreach ($productPivotRows as $pivotData): ?>
+                                                <?php
+                                                $headerLabel = trim((string)$pivotData['product_code']);
+                                                if ($headerLabel === '') {
+                                                    $headerLabel = 'PRODUCT';
+                                                }
+                                                $headerSuffix = trim((string)$pivotData['uom']);
+                                                ?>
+                                                <th class="text-end pivot-product-header"><?php echo htmlspecialchars($headerLabel); ?><?php echo $headerSuffix !== '' ? '<br>(' . htmlspecialchars($headerSuffix) . ')' : ''; ?></th>
+                                            <?php endforeach; ?>
+                                        </tr>
+                                    <?php else: ?>
+                                        <tr class="daily-register-head-bottom text-center align-middle">
+                                            <th>No.</th>
+                                            <th>Source Channel</th>
+                                            <th class="text-end">Transactions</th>
+                                            <th class="text-end">Total Amount</th>
+                                            <th class="text-end">Cash</th>
+                                            <th class="text-end">On Account</th>
+                                        </tr>
+                                    <?php endif; ?>
+                                </thead>
+                                <tbody>
+                                    <?php
+                                    $lineNumber = 1;
+                                    $grandTotalTransactions = 0;
+                                    $grandTotalAmount = 0.0;
+                                    $grandTotalCash = 0.0;
+                                    $grandTotalOnAccount = 0.0;
+                                    $grandProductAmount = [];
+                                    foreach ($productPivotRows as $pivotData) {
+                                        $pivotCodeKey = strtoupper(trim((string)$pivotData['product_code']));
+                                        if ($pivotCodeKey !== '') {
+                                            $grandProductAmount[$pivotCodeKey] = 0.0;
+                                        }
+                                    }
+                                    ?>
+                                    <?php foreach ($sourceChannelSummaryRows as $sourceRow): ?>
+                                        <?php
+                                        $grandTotalTransactions += (int)$sourceRow['transaction_count'];
+                                        $grandTotalAmount += (float)$sourceRow['amount'];
+                                        $grandTotalCash += (float)$sourceRow['cash'];
+                                        $grandTotalOnAccount += (float)$sourceRow['on_account'];
+                                        ?>
+                                        <tr>
+                                            <td class="text-center"><?php echo $lineNumber++; ?></td>
+                                            <td><?php echo htmlspecialchars($sourceRow['source_channel']); ?></td>
+                                            <td class="text-end"><?php echo number_format((float)$sourceRow['transaction_count']); ?></td>
+                                            <td class="text-end"><?php echo number_format((float)$sourceRow['amount'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format((float)$sourceRow['cash'], 2); ?></td>
+                                            <td class="text-end"><?php echo number_format((float)$sourceRow['on_account'], 2); ?></td>
+                                            <?php foreach ($productPivotRows as $pivotData): ?>
+                                                <?php
+                                                $productCodeKey = strtoupper(trim((string)$pivotData['product_code']));
+                                                $pivotAmount = $productCodeKey !== '' && isset($sourceRow['products'][$productCodeKey])
+                                                    ? (float)$sourceRow['products'][$productCodeKey]
+                                                    : 0.0;
+                                                if (isset($grandProductAmount[$productCodeKey])) {
+                                                    $grandProductAmount[$productCodeKey] += $pivotAmount;
+                                                }
+                                                ?>
+                                                <td class="text-end"><?php echo number_format($pivotAmount, 2); ?></td>
+                                            <?php endforeach; ?>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                                <tfoot>
+                                    <tr class="fw-bold">
+                                        <td></td>
+                                        <td class="text-end">TOTAL</td>
+                                        <td class="text-end"><?php echo number_format($grandTotalTransactions); ?></td>
+                                        <td class="text-end"><?php echo number_format($grandTotalAmount, 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($grandTotalCash, 2); ?></td>
+                                        <td class="text-end"><?php echo number_format($grandTotalOnAccount, 2); ?></td>
+                                        <?php foreach ($productPivotRows as $pivotData): ?>
+                                            <?php
+                                            $productCodeKey = strtoupper(trim((string)$pivotData['product_code']));
+                                            $totalProductAmount = isset($grandProductAmount[$productCodeKey]) ? (float)$grandProductAmount[$productCodeKey] : 0.0;
+                                            ?>
+                                            <td class="text-end"><?php echo number_format($totalProductAmount, 2); ?></td>
+                                        <?php endforeach; ?>
                                     </tr>
                                 </tfoot>
                             </table>

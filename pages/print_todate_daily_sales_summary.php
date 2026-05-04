@@ -1494,8 +1494,8 @@ if ($reportType === 'by_product') {
     $otherPivotByDateUmu = buildOthersPivotByDate($registerRowsUmu);
 
     $summaryUmuSheet = $spreadsheet->createSheet();
-    $summaryUmuSheet->setTitle('Sales Summary UMU');
-    $summaryUmuSheet->setCellValue('A1', 'Sales Summary by Date - By Product (UMU)');
+    $summaryUmuSheet->setTitle('Sales Summary BY KG');
+    $summaryUmuSheet->setCellValue('A1', 'Sales Summary by Date - By Product (BY KG)');
     $summaryUmuSheet->getStyle('A1')->getFont()->setBold(true)->setSize(14);
     $summaryUmuSheet->setCellValue('A2', 'Date Range: ' . $rangeLabel);
     $summaryUmuSheet->setCellValue('A3', 'Generated: ' . $generatedAt);
@@ -1506,7 +1506,7 @@ if ($reportType === 'by_product') {
         'NO.',
         'DATE',
         'TRANSACTION COUNT',
-        'TOTAL QTY (UMU)',
+        'TOTAL QTY (BY KG)',
         'TOTAL AMOUNT',
         'AMOUNT RECEIVED',
         'CHANGE',
@@ -1556,6 +1556,8 @@ if ($reportType === 'by_product') {
         $summaryUmuCurrentRow++;
         $summaryUmuCounter++;
     }
+
+    $summaryUmuSheet->getColumnDimension('D')->setVisible(false);
 
     $lastSummaryUmuDetailRow = $summaryUmuCurrentRow - 1;
     $summaryUmuSheet->setCellValue("B{$summaryUmuCurrentRow}", 'Total');
@@ -1854,7 +1856,7 @@ if ($reportType === 'by_product') {
 }
 
 if ($reportType === 'by_product') {
-    foreach (['E', 'F', 'G', 'H', 'I'] as $hiddenColumn) {
+    foreach (['D', 'E', 'F', 'G', 'H', 'I'] as $hiddenColumn) {
         $summarySheet->getColumnDimension($hiddenColumn)->setVisible(false);
     }
     $spreadsheet->removeSheetByIndex(0);
