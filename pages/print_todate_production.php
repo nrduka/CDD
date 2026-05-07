@@ -61,18 +61,25 @@ if (!isset($mysqli) || !$mysqli) {
     exit;
 }
 
-function resolveToDateProductionTimeLabelForExport($value)
+function resolveToDateProductionDateTimeLabelForExport($datetimeValue, $dateValue = '', $timeValue = '')
 {
-    $timeValue = trim((string)$value);
-    if ($timeValue === '' || $timeValue === '00:00:00') {
-        return '';
-    }
-    $timeObject = DateTime::createFromFormat('H:i:s', $timeValue);
-    if ($timeObject instanceof DateTime) {
-        return $timeObject->format('H:i:s');
+    $datetimeValue = trim((string)$datetimeValue);
+    if ($datetimeValue !== '' && $datetimeValue !== '0000-00-00 00:00:00') {
+        $datetimeObject = DateTime::createFromFormat('Y-m-d H:i:s', $datetimeValue);
+        if ($datetimeObject instanceof DateTime) {
+            return $datetimeObject->format('Y-m-d H:i:s');
+        }
+
+        return $datetimeValue;
     }
 
-    return $timeValue;
+    $dateValue = trim((string)$dateValue);
+    $timeValue = trim((string)$timeValue);
+    if ($dateValue !== '' && $timeValue !== '' && $timeValue !== '00:00:00') {
+        return $dateValue . ' ' . $timeValue;
+    }
+
+    return $dateValue;
 }
 
 function fetchToDateProductionRowsForExport($mysqli, $startDate, $endDate)
@@ -83,6 +90,8 @@ function fetchToDateProductionRowsForExport($mysqli, $startDate, $endDate)
                    ip.production_code,
                    ip.date_production,
                    ip.time_dropped,
+                   ip.datetime_started,
+                   ip.datetime_ended,
                    ip.machine,
                    ip.finished_ice_qty,
                    ip.loose_ice_qty,
@@ -92,7 +101,7 @@ function fetchToDateProductionRowsForExport($mysqli, $startDate, $endDate)
             FROM ice_production ip
             LEFT JOIN ice_machine im ON im.id = ip.machine
             WHERE ip.date_production BETWEEN ? AND ?
-            ORDER BY ip.date_production, COALESCE(ip.time_dropped, '00:00:00'), im.machine_description, ip.id";
+            ORDER BY COALESCE(ip.datetime_started, ip.date_production), COALESCE(ip.time_dropped, '00:00:00'), im.machine_description, ip.id";
 
     $stmt = $mysqli->prepare($sql);
     if ($stmt) {
@@ -118,7 +127,8 @@ function fetchToDateProductionRowsForExport($mysqli, $startDate, $endDate)
                 $rows[] = [
                     'id' => isset($row['id']) ? (int)$row['id'] : 0,
                     'date_production' => isset($row['date_production']) ? (string)$row['date_production'] : '',
-                    'time_dropped' => resolveToDateProductionTimeLabelForExport(isset($row['time_dropped']) ? $row['time_dropped'] : ''),
+                    'datetime_started' => resolveToDateProductionDateTimeLabelForExport(isset($row['datetime_started']) ? $row['datetime_started'] : '', isset($row['date_production']) ? $row['date_production'] : '', isset($row['time_dropped']) ? $row['time_dropped'] : ''),
+                    'datetime_ended' => resolveToDateProductionDateTimeLabelForExport(isset($row['datetime_ended']) ? $row['datetime_ended'] : ''),
                     'dpr_code' => $dprCode,
                     'machine_id' => $machineId,
                     'machine_description' => $machineDescription,
@@ -240,7 +250,7 @@ $summaryBorderStyle = [
 
 $decimalFormat = '#,##0.00';
 
-$sheet->setCellValue('I1', 'TOTAL FINISHED ICE QTY (SACK)');
+$sheet->setCellValue('I1', 'TOTAL FINISHED ICE QTY (KG)');
 $sheet->setCellValue('K1', $totalFinishedIceQty);
 $sheet->setCellValue('I2', 'TOTAL LOOSE ICE QTY (KG)');
 $sheet->setCellValue('K2', $totalLooseIceQty);
@@ -268,7 +278,7 @@ if ($reportType === 'by_product_machine') {
         'PRODUCT TYPE',
         'MACHINE',
         'PRODUCTION',
-        'FINISHED ICE QTY (SACK)',
+        'FINISHED ICE QTY (KG)',
         'LOOSE ICE QTY (KG)'
     ];
 
@@ -346,12 +356,12 @@ if ($reportType === 'by_product_machine') {
 } else {
     $headers = [
         'NO.',
-        'DATE',
-        'TIME DROPPED',
+        'DATE/TIME STARTED',
+        'DATE/TIME END',
         'DPR CODE',
         'MACHINE',
         'PRODUCT TYPE',
-        'FINISHED ICE QTY (SACK)',
+        'FINISHED ICE QTY (KG)',
         'LOOSE ICE QTY (KG)',
         'REMARKS'
     ];
@@ -368,8 +378,8 @@ if ($reportType === 'by_product_machine') {
     $lineNumber = 1;
     foreach ($registerRows as $row) {
         $sheet->setCellValue("A{$currentRow}", $lineNumber);
-        $sheet->setCellValueExplicit("B{$currentRow}", (string)$row['date_production'], DataType::TYPE_STRING);
-        $sheet->setCellValueExplicit("C{$currentRow}", (string)$row['time_dropped'], DataType::TYPE_STRING);
+        $sheet->setCellValueExplicit("B{$currentRow}", (string)$row['datetime_started'], DataType::TYPE_STRING);
+        $sheet->setCellValueExplicit("C{$currentRow}", (string)$row['datetime_ended'], DataType::TYPE_STRING);
         $sheet->setCellValueExplicit("D{$currentRow}", (string)$row['dpr_code'], DataType::TYPE_STRING);
         $sheet->setCellValue("E{$currentRow}", (string)$row['machine_description']);
         $sheet->setCellValue("F{$currentRow}", (string)$row['product_type']);

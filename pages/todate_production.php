@@ -46,18 +46,25 @@ if ($startDate > $endDate) {
     $endObject = DateTime::createFromFormat('Y-m-d', $endDate);
 }
 
-function resolveProductionRangeTimeLabel($value)
+function resolveProductionRangeDateTimeLabel($datetimeValue, $dateValue = '', $timeValue = '')
 {
-    $timeValue = trim((string)$value);
-    if ($timeValue === '' || $timeValue === '00:00:00') {
-        return '';
-    }
-    $timeObject = DateTime::createFromFormat('H:i:s', $timeValue);
-    if ($timeObject instanceof DateTime) {
-        return $timeObject->format('H:i:s');
+    $datetimeValue = trim((string)$datetimeValue);
+    if ($datetimeValue !== '' && $datetimeValue !== '0000-00-00 00:00:00') {
+        $datetimeObject = DateTime::createFromFormat('Y-m-d H:i:s', $datetimeValue);
+        if ($datetimeObject instanceof DateTime) {
+            return $datetimeObject->format('Y-m-d H:i:s');
+        }
+
+        return $datetimeValue;
     }
 
-    return $timeValue;
+    $dateValue = trim((string)$dateValue);
+    $timeValue = trim((string)$timeValue);
+    if ($dateValue !== '' && $timeValue !== '' && $timeValue !== '00:00:00') {
+        return $dateValue . ' ' . $timeValue;
+    }
+
+    return $dateValue;
 }
 
 function fetchToDateProductionRows($mysqli, $startDate, $endDate)
@@ -68,6 +75,8 @@ function fetchToDateProductionRows($mysqli, $startDate, $endDate)
                    ip.production_code,
                    ip.date_production,
                    ip.time_dropped,
+                   ip.datetime_started,
+                   ip.datetime_ended,
                    ip.machine,
                    ip.finished_ice_qty,
                    ip.loose_ice_qty,
@@ -77,7 +86,7 @@ function fetchToDateProductionRows($mysqli, $startDate, $endDate)
             FROM ice_production ip
             LEFT JOIN ice_machine im ON im.id = ip.machine
             WHERE ip.date_production BETWEEN ? AND ?
-            ORDER BY ip.date_production, COALESCE(ip.time_dropped, '00:00:00'), im.machine_description, ip.id";
+            ORDER BY COALESCE(ip.datetime_started, ip.date_production), COALESCE(ip.time_dropped, '00:00:00'), im.machine_description, ip.id";
 
     $stmt = $mysqli->prepare($sql);
     if ($stmt) {
@@ -103,7 +112,8 @@ function fetchToDateProductionRows($mysqli, $startDate, $endDate)
                 $rows[] = [
                     'id' => isset($row['id']) ? (int)$row['id'] : 0,
                     'date_production' => isset($row['date_production']) ? (string)$row['date_production'] : '',
-                    'time_dropped' => resolveProductionRangeTimeLabel(isset($row['time_dropped']) ? $row['time_dropped'] : ''),
+                    'datetime_started' => resolveProductionRangeDateTimeLabel(isset($row['datetime_started']) ? $row['datetime_started'] : '', isset($row['date_production']) ? $row['date_production'] : '', isset($row['time_dropped']) ? $row['time_dropped'] : ''),
+                    'datetime_ended' => resolveProductionRangeDateTimeLabel(isset($row['datetime_ended']) ? $row['datetime_ended'] : ''),
                     'dpr_code' => $dprCode,
                     'machine_id' => $machineId,
                     'machine_description' => $machineDescription,
@@ -305,7 +315,7 @@ ob_start();
                     <table class="table table-sm table-bordered summary-table mb-0">
                         <tbody>
                             <tr>
-                                <th class="text-uppercase small text-muted">Total Finished Ice Qty (Sack)</th>
+                                <th class="text-uppercase small text-muted">Total Finished Ice Qty (Kg)</th>
                                 <td class="value"><?php echo number_format($reportMeta['total_finished_ice_qty'], 2); ?></td>
                             </tr>
                             <tr>
@@ -348,18 +358,18 @@ ob_start();
                                         <th>Product Type</th>
                                         <th>Machine</th>
                                         <th class="text-end">Production</th>
-                                        <th class="text-end">Finished Ice Qty (Sack)</th>
+                                        <th class="text-end">Finished Ice Qty (Kg)</th>
                                         <th class="text-end">Loose Ice Qty (Kg)</th>
                                     </tr>
                                 <?php else: ?>
                                     <tr class="production-head text-center align-middle">
                                         <th>No.</th>
-                                        <th>Date</th>
-                                        <th>Time Dropped</th>
+                                        <th>Date/Time Started</th>
+                                        <th>Date/Time End</th>
                                         <th>DPR Code</th>
                                         <th>Machine</th>
                                         <th>Product Type</th>
-                                        <th class="text-end">Finished Ice Qty (Sack)</th>
+                                        <th class="text-end">Finished Ice Qty (Kg)</th>
                                         <th class="text-end">Loose Ice Qty (Kg)</th>
                                         <th>Remarks</th>
                                     </tr>
@@ -381,8 +391,8 @@ ob_start();
                                     <?php foreach ($registerRows as $index => $row): ?>
                                         <tr>
                                             <td class="text-center"><?php echo $index + 1; ?></td>
-                                            <td><?php echo htmlspecialchars($row['date_production']); ?></td>
-                                            <td><?php echo htmlspecialchars($row['time_dropped']); ?></td>
+                                            <td><?php echo htmlspecialchars($row['datetime_started']); ?></td>
+                                            <td><?php echo htmlspecialchars($row['datetime_ended']); ?></td>
                                             <td><?php echo htmlspecialchars($row['dpr_code']); ?></td>
                                             <td><?php echo htmlspecialchars($row['machine_description']); ?></td>
                                             <td><?php echo htmlspecialchars($row['product_type']); ?></td>

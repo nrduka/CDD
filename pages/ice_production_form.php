@@ -11,11 +11,9 @@ $errors = [];
 $successMessage = '';
 
 $formData = [
-    'date_production' => '',
+    'datetime_started' => '',
+    'datetime_ended' => '',
     'machine' => '',
-    'operator_id' => [],
-    'assistant_id' => [],
-    'time_dropped' => '',
     'finished_ice_qty' => '',
     'loose_ice_qty' => '',
     'remarks' => '',
@@ -30,29 +28,6 @@ function h($value)
 function sanitizeText($value)
 {
     return trim((string)$value);
-}
-
-function sanitizeArray($values)
-{
-    $clean = [];
-    foreach ((array)$values as $value) {
-        $value = sanitizeText($value);
-        if ($value !== '') {
-            $clean[] = $value;
-        }
-    }
-    return array_values(array_unique($clean));
-}
-
-function formatEmployeeName(array $employee)
-{
-    $parts = [];
-    foreach (['firstName', 'middleName', 'lastName'] as $field) {
-        if (!empty($employee[$field])) {
-            $parts[] = $employee[$field];
-        }
-    }
-    return implode(' ', $parts);
 }
 
 function generate_dpr_code($mysqli, $productionDate)
@@ -109,50 +84,48 @@ if (isset($mysqli) && $mysqli) {
     }
 }
 
-$employeeOptions = [];
-if (isset($mysqli) && $mysqli) {
-    $result = $mysqli->query("SELECT empno, firstName, middleName, lastName FROM manpoweremployee WHERE empstatus='active' ORDER BY lastName, firstName, middleName");
-    if ($result instanceof mysqli_result) {
-        while ($row = $result->fetch_assoc()) {
-            $employeeOptions[] = $row;
-        }
-        $result->free();
-    }
-}
-
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     foreach ($formData as $key => $value) {
-        if (in_array($key, ['operator_id', 'assistant_id'], true)) {
-            $formData[$key] = sanitizeArray(isset($_POST[$key]) ? $_POST[$key] : []);
-        } else {
-            $formData[$key] = sanitizeText(isset($_POST[$key]) ? $_POST[$key] : '');
-        }
+        $formData[$key] = sanitizeText(isset($_POST[$key]) ? $_POST[$key] : '');
     }
 
     if (!isset($mysqli) || !$mysqli) {
         $errors[] = 'Database connection unavailable.';
     }
 
-    if ($formData['date_production'] === '') {
-        $errors[] = 'Production date is required.';
-    } elseif (!DateTime::createFromFormat('Y-m-d', $formData['date_production'])) {
-        $errors[] = 'Production date must be in YYYY-MM-DD format.';
+    $startedAt = null;
+    $endedAt = null;
+
+    if ($formData['datetime_started'] === '') {
+        $errors[] = 'Date/time started is required.';
+    } else {
+        $startedAt = DateTime::createFromFormat('Y-m-d\TH:i', $formData['datetime_started']);
+        if (!$startedAt || $startedAt->format('Y-m-d\TH:i') !== $formData['datetime_started']) {
+            $errors[] = 'Date/time started must be a valid date and time.';
+        }
+    }
+
+    if ($formData['datetime_ended'] === '') {
+        $errors[] = 'Date/time end is required.';
+    } else {
+        $endedAt = DateTime::createFromFormat('Y-m-d\TH:i', $formData['datetime_ended']);
+        if (!$endedAt || $endedAt->format('Y-m-d\TH:i') !== $formData['datetime_ended']) {
+            $errors[] = 'Date/time end must be a valid date and time.';
+        }
+    }
+
+    if ($startedAt && $endedAt && $endedAt < $startedAt) {
+        $errors[] = 'Date/time end cannot be earlier than date/time started.';
     }
 
     if ($formData['machine'] === '' || !ctype_digit($formData['machine'])) {
         $errors[] = 'Please select a machine.';
     }
 
-    if (!$formData['operator_id']) {
-        $errors[] = 'Operator is required.';
-    }
-
-    if (!$formData['assistant_id']) {
-        $errors[] = 'Assistant is required.';
-    }
-
-    if ($formData['finished_ice_qty'] === '' || !ctype_digit($formData['finished_ice_qty'])) {
-        $errors[] = 'Finished ice quantity must be a whole number.';
+    if ($formData['finished_ice_qty'] === '') {
+        $errors[] = 'Finished ice quantity is required.';
+    } elseif (!is_numeric($formData['finished_ice_qty'])) {
+        $errors[] = 'Finished ice quantity must be a valid number.';
     }
 
     if ($formData['loose_ice_qty'] === '') {
@@ -171,28 +144,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $formData['product_type'] = $machineProductTypes[(int)$formData['machine']];
     }
 
-    $employeeEmpnos = array_map('strval', array_column($employeeOptions, 'empno'));
-    if ($formData['operator_id']) {
-        $invalidOperators = array_diff($formData['operator_id'], $employeeEmpnos);
-        if ($invalidOperators) {
-            $errors[] = 'Selected operator entries are invalid.';
-        }
-    }
-    if ($formData['assistant_id']) {
-        $invalidAssistants = array_diff($formData['assistant_id'], $employeeEmpnos);
-        if ($invalidAssistants) {
-            $errors[] = 'Selected assistant entries are invalid.';
-        }
-    }
-
     if (!$errors) {
-        $date_production = $formData['date_production'];
+        $datetime_started = $startedAt->format('Y-m-d H:i:s');
+        $datetime_ended = $endedAt->format('Y-m-d H:i:s');
+        $date_production = $startedAt->format('Y-m-d');
         $machine = (int)$formData['machine'];
-        $finished_ice_qty = (int)$formData['finished_ice_qty'];
+        $finished_ice_qty = (float)$formData['finished_ice_qty'];
         $loose_ice_qty = (float)$formData['loose_ice_qty'];
-        $time_dropped = $formData['time_dropped'] !== '' ? $formData['time_dropped'] : null;
-        $operator_id = $formData['operator_id'] ? implode(',', $formData['operator_id']) : null;
-        $assistant_id = $formData['assistant_id'] ? implode(',', $formData['assistant_id']) : null;
+        $operator_id = '';
+        $assistant_id = null;
+        $time_dropped = null;
+        $drop_no = 0;
         $remarks = $formData['remarks'] !== '' ? $formData['remarks'] : null;
         $product_type = isset($machineProductTypes[$machine]) ? $machineProductTypes[$machine] : '';
         if ($product_type === '') {
@@ -210,12 +172,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 machine,
                 operator_id,
                 assistant_id,
+                drop_no,
                 time_dropped,
+                datetime_started,
+                datetime_ended,
                 finished_ice_qty,
                 loose_ice_qty,
                 remarks,
                 product_type
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
 
         $stmt = $mysqli->prepare($insertSql);
         if (!$stmt) {
@@ -231,14 +196,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
 
                 $bindOk = $stmt->bind_param(
-                    'sssisssidss',
+                    'sssississsddss',
                     $dpr_code,
                     $date_production,
                     $production_code,
                     $machine,
                     $operator_id,
                     $assistant_id,
+                    $drop_no,
                     $time_dropped,
+                    $datetime_started,
+                    $datetime_ended,
                     $finished_ice_qty,
                     $loose_ice_qty,
                     $remarks,
@@ -275,17 +243,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         border: 1px solid #dbe3f2;
         box-shadow: 0 14px 30px rgba(15, 39, 80, 0.12);
     }
-    .employee-checklist {
-        max-height: 240px;
-        overflow-y: auto;
-        border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        padding: 12px;
-        background: #f8fafc;
-    }
-    .employee-checklist .form-check + .form-check {
-        margin-top: 6px;
-    }
 </style>
 <?php $styles = ob_get_clean(); ?>
 
@@ -311,8 +268,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     <form method="post" class="row g-3">
                         <div class="col-12 col-md-3">
-                            <label class="form-label fw-semibold">Production Date *</label>
-                            <input type="date" name="date_production" class="form-control" value="<?php echo h($formData['date_production']); ?>" required>
+                            <label class="form-label fw-semibold">Date/Time Started *</label>
+                            <input type="datetime-local" name="datetime_started" class="form-control" value="<?php echo h($formData['datetime_started']); ?>" required>
+                        </div>
+                        <div class="col-12 col-md-3">
+                            <label class="form-label fw-semibold">Date/Time End *</label>
+                            <input type="datetime-local" name="datetime_ended" class="form-control" value="<?php echo h($formData['datetime_ended']); ?>" required>
                         </div>
                         <div class="col-12 col-md-6">
                             <label class="form-label fw-semibold">Machine *</label>
@@ -328,66 +289,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             </select>
                         </div>
 
-                        <div class="col-12 col-md-6">
-                            <label class="form-label fw-semibold">Operator *</label>
-                            <input type="text" class="form-control form-control-sm mb-2" placeholder="Search operator..." data-employee-filter="operator">
-                            <div class="employee-checklist">
-                                <?php if ($employeeOptions): ?>
-                                    <?php
-                                    $selectedOperators = array_flip($formData['operator_id']);
-                                    foreach ($employeeOptions as $employee):
-                                        $empnoValue = (string)$employee['empno'];
-                                        $empId = preg_replace('/[^a-zA-Z0-9_-]/', '', $empnoValue);
-                                        $displayName = $empnoValue . ' - ' . formatEmployeeName($employee);
-                                        $isChecked = isset($selectedOperators[$empnoValue]) ? 'checked' : '';
-                                    ?>
-                                        <div class="form-check">
-                                            <input class="form-check-input" type="checkbox" name="operator_id[]" id="operator-<?php echo h($empId); ?>" value="<?php echo h($empnoValue); ?>" <?php echo $isChecked; ?>>
-                                            <label class="form-check-label" for="operator-<?php echo h($empId); ?>">
-                                                <?php echo h($displayName); ?>
-                                            </label>
-                                        </div>
-                                    <?php endforeach; ?>
-                                <?php else: ?>
-                                    <div class="text-muted">No employees available.</div>
-                                <?php endif; ?>
-                            </div>
-                        </div>
-                        <div class="col-12 col-md-6">
-                            <label class="form-label fw-semibold">Assistant *</label>
-                            <input type="text" class="form-control form-control-sm mb-2" placeholder="Search assistant..." data-employee-filter="assistant">
-                            <div class="employee-checklist">
-                                <?php if ($employeeOptions): ?>
-                                    <?php
-                                    $selectedAssistants = array_flip($formData['assistant_id']);
-                                    foreach ($employeeOptions as $employee):
-                                        $empnoValue = (string)$employee['empno'];
-                                        $empId = preg_replace('/[^a-zA-Z0-9_-]/', '', $empnoValue);
-                                        $displayName = $empnoValue . ' - ' . formatEmployeeName($employee);
-                                        $isChecked = isset($selectedAssistants[$empnoValue]) ? 'checked' : '';
-                                    ?>
-                                        <div class="form-check">
-                                            <input class="form-check-input" type="checkbox" name="assistant_id[]" id="assistant-<?php echo h($empId); ?>" value="<?php echo h($empnoValue); ?>" <?php echo $isChecked; ?>>
-                                            <label class="form-check-label" for="assistant-<?php echo h($empId); ?>">
-                                                <?php echo h($displayName); ?>
-                                            </label>
-                                        </div>
-                                    <?php endforeach; ?>
-                                <?php else: ?>
-                                    <div class="text-muted">No employees available.</div>
-                                <?php endif; ?>
-                            </div>
-                        </div>
-
-                        <div class="col-12 col-md-3">
-                            <label class="form-label fw-semibold">Time Dropped</label>
-                            <input type="time" name="time_dropped" class="form-control" value="<?php echo h($formData['time_dropped']); ?>">
-                        </div>
                         <div class="col-12 col-md-3">
                             <label class="form-label fw-semibold">Finished Ice Qty *</label>
                             <div class="input-group">
-                                <input type="number" name="finished_ice_qty" class="form-control" min="0" step="1" value="<?php echo h($formData['finished_ice_qty']); ?>" required>
-                                <span class="input-group-text">SACK</span>
+                                <input type="number" name="finished_ice_qty" class="form-control" min="0" step="0.01" value="<?php echo h($formData['finished_ice_qty']); ?>" required>
+                                <span class="input-group-text">KG</span>
                             </div>
                         </div>
                         <div class="col-12 col-md-3">
@@ -420,39 +326,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 <?php ob_start(); ?>
 <script>
-    function setupEmployeeFilters() {
-        const filters = document.querySelectorAll('[data-employee-filter]');
-        filters.forEach((filter) => {
-            const type = filter.getAttribute('data-employee-filter');
-            const list = filter.nextElementSibling;
-            if (!list) return;
-            filter.addEventListener('input', () => {
-                const query = filter.value.trim().toLowerCase();
-                const items = list.querySelectorAll('.form-check');
-                items.forEach((item) => {
-                    const text = item.textContent.toLowerCase();
-                    item.style.display = text.includes(query) ? '' : 'none';
-                });
-            });
-        });
-    }
-
-    function validateOperatorSelection(event) {
-        const selectedOperators = document.querySelectorAll('input[name="operator_id[]"]:checked');
-        if (selectedOperators.length === 0) {
-            alert('Please select at least one operator.');
-            event.preventDefault();
-            return false;
-        }
-        const selectedAssistants = document.querySelectorAll('input[name="assistant_id[]"]:checked');
-        if (selectedAssistants.length === 0) {
-            alert('Please select at least one assistant.');
-            event.preventDefault();
-            return false;
-        }
-        return true;
-    }
-
     function updateProductTypeFromMachine() {
         const machineSelect = document.querySelector('select[name="machine"]');
         const productTypeInput = document.querySelector('input[name="product_type"]');
@@ -463,11 +336,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     document.addEventListener('DOMContentLoaded', () => {
-        setupEmployeeFilters();
-        const form = document.querySelector('form');
-        if (form) {
-            form.addEventListener('submit', validateOperatorSelection);
-        }
         const machineSelect = document.querySelector('select[name="machine"]');
         if (machineSelect) {
             machineSelect.addEventListener('change', updateProductTypeFromMachine);
