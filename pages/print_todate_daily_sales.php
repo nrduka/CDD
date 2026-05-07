@@ -107,6 +107,21 @@ function buildCustomerDisplayName($row)
     return trim((string)(isset($row['customer_code']) ? $row['customer_code'] : ''));
 }
 
+function buildSourceChannelLabel($row)
+{
+    $channel = trim((string)(isset($row['source_channel']) ? $row['source_channel'] : ''));
+    if ($channel !== '') {
+        return $channel;
+    }
+
+    $customerSource = trim((string)(isset($row['customer_source']) ? $row['customer_source'] : ''));
+    if ($customerSource !== '' && $customerSource !== '0') {
+        return 'SOURCE ' . $customerSource;
+    }
+
+    return 'UNASSIGNED';
+}
+
 function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
 {
     $rows = [];
@@ -127,13 +142,22 @@ function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
                    c.storeName,
                    c.firstName,
                    c.middleName,
-                   c.lastName
+                   c.lastName,
+                   c.customer_source,
+                   sc.customer_channel AS source_channel
              FROM sales s
              LEFT JOIN ice_product p ON p.product_code = s.product_code
              LEFT JOIN customer_register c ON c.customer_code = s.customer_code
+             LEFT JOIN source_channel sc ON sc.customer_source = c.customer_source
              WHERE DATE(COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created)) BETWEEN ? AND ?
               AND (s.void_status IS NULL OR s.void_status = 0)
-             ORDER BY COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created), s.order_no, s.lineitem";
+             ORDER BY c.customer_source,
+                      c.storeName,
+                      c.firstName,
+                      c.lastName,
+                      COALESCE(NULLIF(s.date_time_ordered, '0000-00-00 00:00:00'), s.date_created),
+                      s.order_no,
+                      s.lineitem";
 
     $stmt = $mysqli->prepare($sql);
     if ($stmt) {
@@ -171,6 +195,8 @@ function fetchToDateRegisterRows($mysqli, $startDate, $endDate)
                     'order_no' => isset($row['order_no']) ? (string)$row['order_no'] : '',
                     'customer_code' => isset($row['customer_code']) ? (string)$row['customer_code'] : '',
                     'customer_name' => buildCustomerDisplayName($row),
+                    'customer_source' => isset($row['customer_source']) ? (string)$row['customer_source'] : '',
+                    'source_channel' => buildSourceChannelLabel($row),
                     'qty' => isset($row['qty']) ? (float)$row['qty'] : 0.0,
                     'product_code' => isset($row['product_code']) ? (string)$row['product_code'] : '',
                     'product_description' => $productDescription,
@@ -471,6 +497,280 @@ function fillMissingSummaryDates($summaryByDate, $startDate, $endDate)
     return $filled;
 }
 
+function buildSourceChannelRegisterGroups($registerRows, $groupByCustomer)
+{
+    $sourceGroups = [];
+
+    foreach ($registerRows as $index => $row) {
+        $sourceChannel = trim((string)(isset($row['source_channel']) ? $row['source_channel'] : ''));
+        if ($sourceChannel === '') {
+            $sourceChannel = 'UNASSIGNED';
+        }
+        $sourceSort = isset($row['customer_source']) && is_numeric($row['customer_source']) ? (int)$row['customer_source'] : 999999;
+        $sourceKey = str_pad((string)$sourceSort, 6, '0', STR_PAD_LEFT) . '|' . strtoupper($sourceChannel);
+        $customerCode = trim((string)(isset($row['customer_code']) ? $row['customer_code'] : ''));
+        $customerName = trim((string)(isset($row['customer_name']) ? $row['customer_name'] : ''));
+        if ($customerName === '' && $customerCode !== '') {
+            $customerName = $customerCode;
+        }
+        $customerKey = strtoupper($customerName) . '|' . strtoupper($customerCode);
+        if ($customerKey === '|') {
+            $customerKey = 'UNASSIGNED|' . $index;
+        }
+        $orderNo = trim((string)(isset($row['order_no']) ? $row['order_no'] : ''));
+        $orderKey = $orderNo !== '' ? $orderNo : '__ROW_' . $index;
+
+        if (!isset($sourceGroups[$sourceKey])) {
+            $sourceGroups[$sourceKey] = [
+                'source_channel' => $sourceChannel,
+                'source_sort' => $sourceSort,
+                'rows' => [],
+                'customer_totals' => [],
+                'qty' => 0.0,
+                'amount' => 0.0,
+                'cash' => 0.0,
+                'on_account' => 0.0
+            ];
+        }
+
+        if ($groupByCustomer && !isset($sourceGroups[$sourceKey]['customer_totals'][$customerKey])) {
+            $sourceGroups[$sourceKey]['customer_totals'][$customerKey] = [
+                'customer_code' => $customerCode,
+                'customer_name' => $customerName,
+                'qty' => 0.0,
+                'amount' => 0.0,
+                'cash' => 0.0,
+                'on_account' => 0.0
+            ];
+        }
+
+        $qty = isset($row['qty']) ? (float)$row['qty'] : 0.0;
+        $amount = isset($row['amount']) ? (float)$row['amount'] : 0.0;
+        $cash = isset($row['cash_once']) ? (float)$row['cash_once'] : 0.0;
+        $onAccount = isset($row['on_account_once']) ? (float)$row['on_account_once'] : 0.0;
+
+        $row['source_channel'] = $sourceChannel;
+        $row['customer_key'] = $customerKey;
+        $row['order_key'] = $orderKey;
+        $sourceGroups[$sourceKey]['rows'][] = $row;
+
+        $sourceGroups[$sourceKey]['qty'] += $qty;
+        $sourceGroups[$sourceKey]['amount'] += $amount;
+        $sourceGroups[$sourceKey]['cash'] += $cash;
+        $sourceGroups[$sourceKey]['on_account'] += $onAccount;
+
+        if ($groupByCustomer) {
+            $sourceGroups[$sourceKey]['customer_totals'][$customerKey]['qty'] += $qty;
+            $sourceGroups[$sourceKey]['customer_totals'][$customerKey]['amount'] += $amount;
+            $sourceGroups[$sourceKey]['customer_totals'][$customerKey]['cash'] += $cash;
+            $sourceGroups[$sourceKey]['customer_totals'][$customerKey]['on_account'] += $onAccount;
+        }
+    }
+
+    foreach ($sourceGroups as &$sourceGroup) {
+        usort($sourceGroup['rows'], function ($left, $right) use ($groupByCustomer) {
+            if ($groupByCustomer) {
+                $customerCompare = strcasecmp((string)$left['customer_name'], (string)$right['customer_name']);
+                if ($customerCompare !== 0) {
+                    return $customerCompare;
+                }
+
+                $codeCompare = strcasecmp((string)$left['customer_code'], (string)$right['customer_code']);
+                if ($codeCompare !== 0) {
+                    return $codeCompare;
+                }
+            }
+
+            $dateCompare = strcmp((string)$left['date'], (string)$right['date']);
+            if ($dateCompare !== 0) {
+                return $dateCompare;
+            }
+
+            $timeCompare = strcmp((string)$left['time'], (string)$right['time']);
+            if ($timeCompare !== 0) {
+                return $timeCompare;
+            }
+
+            return strcasecmp((string)$left['order_no'], (string)$right['order_no']);
+        });
+
+        uasort($sourceGroup['customer_totals'], function ($left, $right) {
+            $customerCompare = strcasecmp((string)$left['customer_name'], (string)$right['customer_name']);
+            if ($customerCompare !== 0) {
+                return $customerCompare;
+            }
+
+            return strcasecmp((string)$left['customer_code'], (string)$right['customer_code']);
+        });
+    }
+    unset($sourceGroup);
+
+    ksort($sourceGroups, SORT_STRING);
+    return array_values($sourceGroups);
+}
+
+function writeSourceChannelSheet($spreadsheet, $sourceGroups, $rangeLabel, $generatedAt, $groupByCustomer, $headerStyle, $borderStyle, $currencyFormat)
+{
+    $sheet = $spreadsheet->createSheet();
+    $sheet->setTitle('BY SOURCE Channel');
+    $sheet->setCellValue('A1', 'BY SOURCE CHANNEL');
+    $sheet->getStyle('A1')->getFont()->setBold(true)->setSize(14);
+    $sheet->setCellValue('A2', 'Date Range: ' . $rangeLabel);
+    $sheet->setCellValue('A3', 'Generated: ' . $generatedAt);
+
+    $headerRow = 8;
+    $dataRow = 9;
+    $headers = [
+        'NO.',
+        'DATE',
+        'TIME',
+        'DR NO.',
+        'CUSTOMER CODE',
+        'CUSTOMER NAME',
+        'QUANTITY',
+        'PRODUCT CODE',
+        'PRODUCT DESCRIPTION',
+        'UNIT PRICE',
+        'AMOUNT',
+        'CASH',
+        'ON ACCOUNT'
+    ];
+    $lastColumnLetter = 'M';
+
+    $sheet->fromArray($headers, null, 'A' . $headerRow);
+    $sheet->getStyle("A{$headerRow}:{$lastColumnLetter}{$headerRow}")->applyFromArray($headerStyle);
+    $sheet->getStyle("A{$headerRow}:{$lastColumnLetter}{$headerRow}")
+        ->getAlignment()
+        ->setWrapText(true)
+        ->setHorizontal(Alignment::HORIZONTAL_CENTER)
+        ->setVertical(Alignment::VERTICAL_CENTER);
+
+    $currentRow = $dataRow;
+    $lineNumber = 1;
+    $grandTotals = [
+        'qty' => 0.0,
+        'amount' => 0.0,
+        'cash' => 0.0,
+        'on_account' => 0.0
+    ];
+
+    if (empty($sourceGroups)) {
+        $sheet->mergeCells("A{$currentRow}:{$lastColumnLetter}{$currentRow}");
+        $sheet->setCellValue("A{$currentRow}", 'No sales were recorded for the selected date range.');
+        $sheet->getStyle("A{$currentRow}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
+        $currentRow++;
+    } else {
+        foreach ($sourceGroups as $sourceGroup) {
+            $sourceChannel = isset($sourceGroup['source_channel']) ? (string)$sourceGroup['source_channel'] : 'UNASSIGNED';
+            $sheet->setCellValue("A{$currentRow}", $sourceChannel);
+            $sheet->getStyle("A{$currentRow}:{$lastColumnLetter}{$currentRow}")->getFont()->setBold(true);
+            $currentRow++;
+
+            $currentCustomerKey = null;
+            $transactionNumberByOrder = [];
+            $transactionRenderedByOrder = [];
+            foreach ($sourceGroup['rows'] as $row) {
+                $customerKey = isset($row['customer_key']) ? (string)$row['customer_key'] : '';
+                if ($groupByCustomer && $currentCustomerKey !== null && $customerKey !== $currentCustomerKey) {
+                    $customerTotal = isset($sourceGroup['customer_totals'][$currentCustomerKey]) ? $sourceGroup['customer_totals'][$currentCustomerKey] : null;
+                    if ($customerTotal !== null) {
+                        $sheet->setCellValue("I{$currentRow}", 'SUBTOTAL - ' . ($customerTotal['customer_name'] !== '' ? $customerTotal['customer_name'] : $customerTotal['customer_code']));
+                        $sheet->setCellValue("G{$currentRow}", (float)$customerTotal['qty']);
+                        $sheet->setCellValue("K{$currentRow}", (float)$customerTotal['amount']);
+                        $sheet->setCellValue("L{$currentRow}", (float)$customerTotal['cash']);
+                        $sheet->setCellValue("M{$currentRow}", (float)$customerTotal['on_account']);
+                        $sheet->getStyle("A{$currentRow}:{$lastColumnLetter}{$currentRow}")->getFont()->setBold(true);
+                        $sheet->getStyle("A{$currentRow}:{$lastColumnLetter}{$currentRow}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('F3F4F6');
+                        $currentRow++;
+                    }
+                }
+                if ($groupByCustomer && $customerKey !== '') {
+                    $currentCustomerKey = $customerKey;
+                }
+
+                $orderKey = isset($row['order_key']) ? (string)$row['order_key'] : '__ROW_' . $currentRow;
+                if (!isset($transactionNumberByOrder[$orderKey])) {
+                    $transactionNumberByOrder[$orderKey] = $lineNumber;
+                    $lineNumber++;
+                }
+                $showTransactionNumber = !isset($transactionRenderedByOrder[$orderKey]);
+                $transactionRenderedByOrder[$orderKey] = true;
+                $orderNo = isset($row['order_no']) ? trim((string)$row['order_no']) : '';
+                $orderNoDisplay = $orderNo !== '' ? 'DR' . $orderNo : '';
+
+                $sheet->setCellValue("A{$currentRow}", $showTransactionNumber ? $transactionNumberByOrder[$orderKey] : '');
+                $sheet->setCellValueExplicit("B{$currentRow}", isset($row['date']) ? (string)$row['date'] : '', DataType::TYPE_STRING);
+                $sheet->setCellValueExplicit("C{$currentRow}", isset($row['time']) ? (string)$row['time'] : '', DataType::TYPE_STRING);
+                $sheet->setCellValueExplicit("D{$currentRow}", $orderNoDisplay, DataType::TYPE_STRING);
+                $sheet->setCellValueExplicit("E{$currentRow}", isset($row['customer_code']) ? (string)$row['customer_code'] : '', DataType::TYPE_STRING);
+                $sheet->setCellValue("F{$currentRow}", isset($row['customer_name']) ? (string)$row['customer_name'] : '');
+                $sheet->setCellValue("G{$currentRow}", isset($row['qty']) ? (float)$row['qty'] : 0.0);
+                $sheet->setCellValueExplicit("H{$currentRow}", isset($row['product_code']) ? (string)$row['product_code'] : '', DataType::TYPE_STRING);
+                $sheet->setCellValue("I{$currentRow}", isset($row['product_description']) ? (string)$row['product_description'] : '');
+                $sheet->setCellValue("J{$currentRow}", isset($row['unit_price']) ? (float)$row['unit_price'] : 0.0);
+                $sheet->setCellValue("K{$currentRow}", isset($row['amount']) ? (float)$row['amount'] : 0.0);
+                $sheet->setCellValue("L{$currentRow}", isset($row['cash_once']) ? (float)$row['cash_once'] : 0.0);
+                $sheet->setCellValue("M{$currentRow}", isset($row['on_account_once']) ? (float)$row['on_account_once'] : 0.0);
+                $currentRow++;
+            }
+
+            if ($groupByCustomer && $currentCustomerKey !== null) {
+                $customerTotal = isset($sourceGroup['customer_totals'][$currentCustomerKey]) ? $sourceGroup['customer_totals'][$currentCustomerKey] : null;
+                if ($customerTotal !== null) {
+                    $sheet->setCellValue("I{$currentRow}", 'SUBTOTAL - ' . ($customerTotal['customer_name'] !== '' ? $customerTotal['customer_name'] : $customerTotal['customer_code']));
+                    $sheet->setCellValue("G{$currentRow}", (float)$customerTotal['qty']);
+                    $sheet->setCellValue("K{$currentRow}", (float)$customerTotal['amount']);
+                    $sheet->setCellValue("L{$currentRow}", (float)$customerTotal['cash']);
+                    $sheet->setCellValue("M{$currentRow}", (float)$customerTotal['on_account']);
+                    $sheet->getStyle("A{$currentRow}:{$lastColumnLetter}{$currentRow}")->getFont()->setBold(true);
+                    $sheet->getStyle("A{$currentRow}:{$lastColumnLetter}{$currentRow}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('F3F4F6');
+                    $currentRow++;
+                }
+            }
+
+            $sheet->setCellValue("I{$currentRow}", 'TOTAL - ' . $sourceChannel);
+            $sheet->setCellValue("G{$currentRow}", (float)$sourceGroup['qty']);
+            $sheet->setCellValue("K{$currentRow}", (float)$sourceGroup['amount']);
+            $sheet->setCellValue("L{$currentRow}", (float)$sourceGroup['cash']);
+            $sheet->setCellValue("M{$currentRow}", (float)$sourceGroup['on_account']);
+            $sheet->getStyle("A{$currentRow}:{$lastColumnLetter}{$currentRow}")->getFont()->setBold(true);
+            $sheet->getStyle("A{$currentRow}:{$lastColumnLetter}{$currentRow}")->applyFromArray($headerStyle);
+            $currentRow++;
+
+            $grandTotals['qty'] += isset($sourceGroup['qty']) ? (float)$sourceGroup['qty'] : 0.0;
+            $grandTotals['amount'] += isset($sourceGroup['amount']) ? (float)$sourceGroup['amount'] : 0.0;
+            $grandTotals['cash'] += isset($sourceGroup['cash']) ? (float)$sourceGroup['cash'] : 0.0;
+            $grandTotals['on_account'] += isset($sourceGroup['on_account']) ? (float)$sourceGroup['on_account'] : 0.0;
+        }
+
+        $sheet->setCellValue("I{$currentRow}", 'GRAND TOTAL');
+        $sheet->setCellValue("G{$currentRow}", $grandTotals['qty']);
+        $sheet->setCellValue("K{$currentRow}", $grandTotals['amount']);
+        $sheet->setCellValue("L{$currentRow}", $grandTotals['cash']);
+        $sheet->setCellValue("M{$currentRow}", $grandTotals['on_account']);
+        $sheet->getStyle("A{$currentRow}:{$lastColumnLetter}{$currentRow}")->applyFromArray($headerStyle);
+        $sheet->getStyle("A{$currentRow}:{$lastColumnLetter}{$currentRow}")->getFont()->setBold(true);
+        $currentRow++;
+    }
+
+    $lastDataRow = $currentRow - 1;
+    if ($lastDataRow >= $headerRow) {
+        $sheet->getStyle("A{$headerRow}:{$lastColumnLetter}{$lastDataRow}")->applyFromArray($borderStyle);
+    }
+    if ($lastDataRow >= $dataRow) {
+        $sheet->getStyle("G{$dataRow}:G{$lastDataRow}")->getNumberFormat()->setFormatCode('#,##0.00');
+        $sheet->getStyle("J{$dataRow}:M{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+        $sheet->getStyle("A{$headerRow}:H{$lastDataRow}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
+        $sheet->getStyle("J{$headerRow}:M{$lastDataRow}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+        $sheet->getStyle("A{$headerRow}:{$lastColumnLetter}{$lastDataRow}")->getAlignment()->setVertical(Alignment::VERTICAL_CENTER);
+    }
+
+    $columnWidths = ['A' => 5, 'B' => 15, 'C' => 15, 'D' => 15, 'E' => 15, 'F' => 26, 'G' => 14, 'H' => 15, 'I' => 40, 'J' => 20, 'K' => 20, 'L' => 20, 'M' => 20];
+    foreach ($columnWidths as $column => $width) {
+        $sheet->getColumnDimension($column)->setAutoSize(false)->setWidth($width);
+    }
+}
+
 $registerRows = fetchToDateRegisterRows($mysqli, $startDate, $endDate);
 $registerRows = enrichRegisterRowsWithOrderPayments($registerRows);
 $productPivotRows = buildProductPivotRows($registerRows);
@@ -491,6 +791,8 @@ $averageDailySales = $dayCount > 0 ? ($totalSales / $dayCount) : 0;
 $averageDailyTransactions = $dayCount > 0 ? ($transactionCount / $dayCount) : 0;
 $summaryByDate = fetchToDateSummaryByDate($registerRows);
 $summaryByDate = fillMissingSummaryDates($summaryByDate, $startDate, $endDate);
+$sourceChannelGroupByCustomer = $startDate !== $endDate;
+$sourceChannelRegisterGroups = buildSourceChannelRegisterGroups($registerRows, $sourceChannelGroupByCustomer);
 
 $rangeLabel = formatRangeLabel($startDate, $endDate);
 $reportRangeLabel = 'from ' . date('F d', strtotime($startDate)) . ' to ' . date('d, Y', strtotime($endDate));
@@ -868,20 +1170,18 @@ if ($reportType === 'by_product') {
         'PRODUCT DESCRIPTION',
         'UNIT PRICE',
         'AMOUNT',
-        'AMOUNT RECEIVED',
-        'CHANGE',
         'CASH',
         'ON ACCOUNT'
     ];
 
     $sheet->fromArray($headers, null, 'A' . $headerRow);
-    $sheet->getStyle("A{$headerRow}:O{$headerRow}")->applyFromArray($headerStyle);
-    $sheet->getStyle("A{$headerRow}:O{$headerRow}")
+    $sheet->getStyle("A{$headerRow}:M{$headerRow}")->applyFromArray($headerStyle);
+    $sheet->getStyle("A{$headerRow}:M{$headerRow}")
         ->getAlignment()
         ->setWrapText(true)
         ->setHorizontal(Alignment::HORIZONTAL_CENTER)
         ->setVertical(Alignment::VERTICAL_CENTER);
-    $sheet->getStyle("A{$headerRow}:O{$headerRow}")->getFont()->getColor()->setRGB('000000');
+    $sheet->getStyle("A{$headerRow}:M{$headerRow}")->getFont()->getColor()->setRGB('000000');
 
     $currentRow = $dataRow;
     $transactionSequence = 0;
@@ -908,10 +1208,8 @@ if ($reportType === 'by_product') {
         $sheet->setCellValue("I{$currentRow}", $row['product_description']);
         $sheet->setCellValue("J{$currentRow}", $row['unit_price']);
         $sheet->setCellValue("K{$currentRow}", $row['amount']);
-        $sheet->setCellValue("L{$currentRow}", isset($row['amt_received_once']) ? (float)$row['amt_received_once'] : 0.0);
-        $sheet->setCellValue("M{$currentRow}", isset($row['amt_change_once']) ? (float)$row['amt_change_once'] : 0.0);
-        $sheet->setCellValue("N{$currentRow}", isset($row['cash_once']) ? (float)$row['cash_once'] : 0.0);
-        $sheet->setCellValue("O{$currentRow}", isset($row['on_account_once']) ? (float)$row['on_account_once'] : 0.0);
+        $sheet->setCellValue("L{$currentRow}", isset($row['cash_once']) ? (float)$row['cash_once'] : 0.0);
+        $sheet->setCellValue("M{$currentRow}", isset($row['on_account_once']) ? (float)$row['on_account_once'] : 0.0);
 
         $currentRow++;
     }
@@ -919,35 +1217,31 @@ if ($reportType === 'by_product') {
     $lastDetailRow = $currentRow - 1;
     $totalRow = $currentRow;
     $sheet->setCellValue("I{$totalRow}", 'TOTAL');
-    $sheet->getStyle("A{$totalRow}:O{$totalRow}")->getFont()->setBold(true);
+    $sheet->getStyle("A{$totalRow}:M{$totalRow}")->getFont()->setBold(true);
     if ($lastDetailRow >= $dataRow) {
         $sheet->setCellValue("K{$totalRow}", "=SUM(K{$dataRow}:K{$lastDetailRow})");
         $sheet->setCellValue("L{$totalRow}", "=SUM(L{$dataRow}:L{$lastDetailRow})");
         $sheet->setCellValue("M{$totalRow}", "=SUM(M{$dataRow}:M{$lastDetailRow})");
-        $sheet->setCellValue("N{$totalRow}", "=SUM(N{$dataRow}:N{$lastDetailRow})");
-        $sheet->setCellValue("O{$totalRow}", "=SUM(O{$dataRow}:O{$lastDetailRow})");
     } else {
         $sheet->setCellValue("K{$totalRow}", 0);
         $sheet->setCellValue("L{$totalRow}", 0);
         $sheet->setCellValue("M{$totalRow}", 0);
-        $sheet->setCellValue("N{$totalRow}", 0);
-        $sheet->setCellValue("O{$totalRow}", 0);
     }
 
     $lastDataRow = $totalRow;
     if ($lastDataRow >= $headerRow) {
-        $sheet->getStyle("A{$headerRow}:O{$lastDataRow}")->applyFromArray($borderStyle);
+        $sheet->getStyle("A{$headerRow}:M{$lastDataRow}")->applyFromArray($borderStyle);
     }
     if ($lastDataRow >= $dataRow) {
         $sheet->getStyle("G{$dataRow}:G{$lastDataRow}")->getNumberFormat()->setFormatCode('#,##0.00');
-        $sheet->getStyle("J{$dataRow}:O{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+        $sheet->getStyle("J{$dataRow}:M{$lastDataRow}")->getNumberFormat()->setFormatCode($currencyFormat);
     }
     $sheet->getStyle("B{$headerRow}:H{$lastDataRow}")
         ->getAlignment()
         ->setHorizontal(Alignment::HORIZONTAL_CENTER)
         ->setVertical(Alignment::VERTICAL_CENTER);
 
-    foreach (range('A', 'O') as $column) {
+    foreach (range('A', 'M') as $column) {
         if (in_array($column, ['B', 'C', 'D', 'E', 'G', 'H'], true)) {
             $sheet->getColumnDimension($column)->setAutoSize(false)->setWidth(15);
             continue;
@@ -956,7 +1250,7 @@ if ($reportType === 'by_product') {
             $sheet->getColumnDimension($column)->setAutoSize(false)->setWidth(26);
             continue;
         }
-        if (in_array($column, ['J', 'K', 'L', 'M', 'N', 'O'], true)) {
+        if (in_array($column, ['J', 'K', 'L', 'M'], true)) {
             $sheet->getColumnDimension($column)->setAutoSize(false)->setWidth(20);
             continue;
         }
@@ -982,15 +1276,13 @@ $summaryHeaders = [
     'TRANSACTION COUNT',
     'TOTAL QTY',
     'TOTAL AMOUNT',
-    'AMOUNT RECEIVED',
-    'CHANGE',
     'CASH',
     'ON ACCOUNT'
 ];
 
 $summarySheet->fromArray($summaryHeaders, null, 'A' . $summaryHeaderRow);
-$summarySheet->getStyle("A{$summaryHeaderRow}:I{$summaryHeaderRow}")->applyFromArray($headerStyle);
-$summarySheet->getStyle("A{$summaryHeaderRow}:I{$summaryHeaderRow}")
+$summarySheet->getStyle("A{$summaryHeaderRow}:G{$summaryHeaderRow}")->applyFromArray($headerStyle);
+$summarySheet->getStyle("A{$summaryHeaderRow}:G{$summaryHeaderRow}")
     ->getAlignment()
     ->setWrapText(true)
     ->setHorizontal(Alignment::HORIZONTAL_CENTER)
@@ -1002,8 +1294,6 @@ $summaryTotals = [
     'transactions' => 0,
     'qty' => 0,
     'amount' => 0,
-    'amt_received' => 0,
-    'amt_change' => 0,
     'cash' => 0,
     'on_account' => 0
 ];
@@ -1013,17 +1303,13 @@ foreach ($summaryByDate as $saleDate => $totals) {
     $summarySheet->setCellValue("C{$currentRow}", $totals['transactions']);
     $summarySheet->setCellValue("D{$currentRow}", $totals['qty']);
     $summarySheet->setCellValue("E{$currentRow}", $totals['amount']);
-    $summarySheet->setCellValue("F{$currentRow}", $totals['amt_received']);
-    $summarySheet->setCellValue("G{$currentRow}", $totals['amt_change']);
-    $summarySheet->setCellValue("H{$currentRow}", $totals['cash']);
-    $summarySheet->setCellValue("I{$currentRow}", $totals['on_account']);
-    $summarySheet->getStyle("D{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
-    $summarySheet->getStyle("E{$currentRow}:I{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+    $summarySheet->setCellValue("F{$currentRow}", $totals['cash']);
+    $summarySheet->setCellValue("G{$currentRow}", $totals['on_account']);
+    $summarySheet->getStyle("D{$currentRow}")->getNumberFormat()->setFormatCode('#,##0.00');
+    $summarySheet->getStyle("E{$currentRow}:G{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
     $summaryTotals['transactions'] += $totals['transactions'];
     $summaryTotals['qty'] += $totals['qty'];
     $summaryTotals['amount'] += $totals['amount'];
-    $summaryTotals['amt_received'] += $totals['amt_received'];
-    $summaryTotals['amt_change'] += $totals['amt_change'];
     $summaryTotals['cash'] += $totals['cash'];
     $summaryTotals['on_account'] += $totals['on_account'];
     $currentRow++;
@@ -1035,13 +1321,12 @@ $summarySheet->setCellValue("B{$currentRow}", 'Total');
 $summarySheet->setCellValue("C{$currentRow}", $summaryTotals['transactions']);
 $summarySheet->setCellValue("D{$currentRow}", $summaryTotals['qty']);
 $summarySheet->setCellValue("E{$currentRow}", $summaryTotals['amount']);
-$summarySheet->setCellValue("F{$currentRow}", $summaryTotals['amt_received']);
-$summarySheet->setCellValue("G{$currentRow}", $summaryTotals['amt_change']);
-$summarySheet->setCellValue("H{$currentRow}", $summaryTotals['cash']);
-$summarySheet->setCellValue("I{$currentRow}", $summaryTotals['on_account']);
-$summarySheet->getStyle("A{$currentRow}:I{$currentRow}")->applyFromArray($headerStyle);
-$summarySheet->getStyle("A{$currentRow}:I{$currentRow}")->getFont()->setBold(true);
-$summarySheet->getStyle("D{$currentRow}:I{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
+$summarySheet->setCellValue("F{$currentRow}", $summaryTotals['cash']);
+$summarySheet->setCellValue("G{$currentRow}", $summaryTotals['on_account']);
+$summarySheet->getStyle("A{$currentRow}:G{$currentRow}")->applyFromArray($headerStyle);
+$summarySheet->getStyle("A{$currentRow}:G{$currentRow}")->getFont()->setBold(true);
+$summarySheet->getStyle("D{$currentRow}")->getNumberFormat()->setFormatCode('#,##0.00');
+$summarySheet->getStyle("E{$currentRow}:G{$currentRow}")->getNumberFormat()->setFormatCode($currencyFormat);
 
 $summaryTotalRow = $currentRow;
 if ($reportType === 'by_product' && !empty($productPivotRows)) {
@@ -1050,7 +1335,7 @@ if ($reportType === 'by_product' && !empty($productPivotRows)) {
     $summaryPivotDescriptionRow = 8;
     $summaryPivotSubHeaderRow = 9;
     $summaryPivotTitleRow = 5;
-    $summaryPivotStartColumnIndex = 10; // J
+    $summaryPivotStartColumnIndex = 8; // H
     $summaryPivotLastColumnIndex = $summaryPivotStartColumnIndex - 1;
     $summaryProductColumnsByCode = [];
     $summaryProductTypeGroups = [];
@@ -1189,10 +1474,10 @@ if ($reportType === 'by_product' && !empty($productPivotRows)) {
 }
 
 if ($currentRow >= $summaryHeaderRow) {
-    $summarySheet->getStyle("A{$summaryHeaderRow}:I{$currentRow}")->applyFromArray($borderStyle);
+    $summarySheet->getStyle("A{$summaryHeaderRow}:G{$currentRow}")->applyFromArray($borderStyle);
 }
 
-foreach (range('A', 'I') as $column) {
+foreach (range('A', 'G') as $column) {
     if ($column === 'A') {
         $summarySheet->getColumnDimension($column)->setAutoSize(false)->setWidth(5);
         continue;
@@ -1201,12 +1486,23 @@ foreach (range('A', 'I') as $column) {
         $summarySheet->getColumnDimension($column)->setAutoSize(false)->setWidth(15);
         continue;
     }
-    if (in_array($column, ['E', 'F', 'G', 'H', 'I'], true)) {
+    if (in_array($column, ['E', 'F', 'G'], true)) {
         $summarySheet->getColumnDimension($column)->setAutoSize(false)->setWidth(20);
         continue;
     }
     $summarySheet->getColumnDimension($column)->setAutoSize(true);
 }
+
+writeSourceChannelSheet(
+    $spreadsheet,
+    $sourceChannelRegisterGroups,
+    $rangeLabel,
+    $generatedAt,
+    $sourceChannelGroupByCustomer,
+    $headerStyle,
+    $borderStyle,
+    $currencyFormat
+);
 
 $spreadsheet->setActiveSheetIndex(0);
 

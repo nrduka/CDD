@@ -489,7 +489,7 @@ ob_start();
         background: #374151;
     }
     .todate-daily-sales-table table {
-        min-width: 1600px;
+        min-width: 1400px;
         white-space: nowrap;
     }
 </style>
@@ -709,8 +709,6 @@ ob_start();
                                         <th>Product Description</th>
                                         <th class="text-end">Unit Price</th>
                                         <th class="text-end">Amount</th>
-                                        <th class="text-end">Amount Received</th>
-                                        <th class="text-end">Change</th>
                                         <th class="text-end">Cash</th>
                                         <th class="text-end">On Account</th>
                                     </tr>
@@ -745,8 +743,6 @@ ob_start();
                                             <td><?php echo htmlspecialchars($row['product_description']); ?></td>
                                             <td class="text-end"><?php echo number_format($row['unit_price'], 2); ?></td>
                                             <td class="text-end"><?php echo number_format($row['amount'], 2); ?></td>
-                                            <td class="text-end"><?php echo number_format($row['amt_received_once'], 2); ?></td>
-                                            <td class="text-end"><?php echo number_format($row['amt_change_once'], 2); ?></td>
                                             <td class="text-end"><?php echo number_format($row['cash_once'], 2); ?></td>
                                             <td class="text-end"><?php echo number_format($row['on_account_once'], 2); ?></td>
                                         </tr>
