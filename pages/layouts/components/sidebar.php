@@ -146,6 +146,9 @@
                                     <li class="slide">
                                         <a href="todate_daily_sales_amount_summary.php" class="side-menu__item">To-Date Sales Amount Summary</a>
                                     </li>
+                                    <li class="slide">
+                                        <a href="todate_daily_issuance_register.php" class="side-menu__item">Daily Issuance Register</a>
+                                    </li>
                                     <li class="slide has-sub">
                                         <a href="javascript:void(0);" class="side-menu__item">
                                             <span class="side-menu__label">Production</span>
