@@ -23,6 +23,7 @@ use PhpOffice\PhpSpreadsheet\Style\Border;
 use PhpOffice\PhpSpreadsheet\Style\Fill;
 use PhpOffice\PhpSpreadsheet\Style\Alignment;
 use PhpOffice\PhpSpreadsheet\Cell\DataType;
+use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
 
 $today = date('Y-m-d');
 $startInput = isset($_GET['start']) ? trim((string)$_GET['start']) : '';
@@ -80,6 +81,33 @@ function resolveToDateProductionDateTimeLabelForExport($datetimeValue, $dateValu
     }
 
     return $dateValue;
+}
+
+function calculateToDateProductionHoursForExport($startedValue, $endedValue)
+{
+    $startedValue = trim((string)$startedValue);
+    $endedValue = trim((string)$endedValue);
+    if ($startedValue === '' || $endedValue === '') {
+        return 0.0;
+    }
+
+    $startedAt = strtotime($startedValue);
+    $endedAt = strtotime($endedValue);
+    if ($startedAt === false || $endedAt === false || $endedAt < $startedAt) {
+        return 0.0;
+    }
+
+    return ($endedAt - $startedAt) / 3600;
+}
+
+function formatToDateProductionMachineLabelForExport($machineDescription)
+{
+    $label = strtoupper(trim((string)$machineDescription));
+    $label = preg_replace('/\s*\([^)]*\)\s*$/', '', $label);
+    $label = preg_replace('/\s+MACHINE\b/', '', $label);
+    $label = preg_replace('/\s+/', ' ', $label);
+
+    return trim($label);
 }
 
 function fetchToDateProductionRowsForExport($mysqli, $startDate, $endDate)
@@ -146,60 +174,156 @@ function fetchToDateProductionRowsForExport($mysqli, $startDate, $endDate)
     return $rows;
 }
 
-function buildToDateProductionMachineGroupsForExport($rows)
+function fetchToDateProductionMachineColumnsForExport($mysqli, $rows)
 {
-    $groups = [];
-    foreach ($rows as $row) {
-        $productType = isset($row['product_type']) ? trim((string)$row['product_type']) : '';
+    $columns = [];
+    $seen = [];
+    $appendColumn = function ($machineId, $machineDescription, $productType) use (&$columns, &$seen) {
+        $machineId = trim((string)$machineId);
+        $machineDescription = trim((string)$machineDescription);
+        $productType = strtoupper(trim((string)$productType));
         if ($productType === '') {
             $productType = 'UNASSIGNED';
         }
-
-        $machineId = isset($row['machine_id']) ? trim((string)$row['machine_id']) : '';
-        $machineDescription = isset($row['machine_description']) ? trim((string)$row['machine_description']) : '';
-        $machineKey = $machineId . '|' . $machineDescription;
-
-        if (!isset($groups[$productType])) {
-            $groups[$productType] = [
-                'subtotal_entries' => 0,
-                'subtotal_finished' => 0.0,
-                'subtotal_loose' => 0.0,
-                'machines' => []
-            ];
+        if ($machineDescription === '') {
+            $machineDescription = $machineId !== '' ? 'Machine ' . $machineId : 'Unknown Machine';
         }
 
-        if (!isset($groups[$productType]['machines'][$machineKey])) {
-            $groups[$productType]['machines'][$machineKey] = [
-                'machine_description' => $machineDescription !== '' ? $machineDescription : 'Unknown Machine',
-                'entry_count' => 0,
-                'finished_ice_qty' => 0.0,
-                'loose_ice_qty' => 0.0
+        $key = $machineId . '|' . $machineDescription;
+        if (isset($seen[$key])) {
+            return;
+        }
+
+        $seen[$key] = true;
+        $columns[] = [
+            'key' => $key,
+            'machine_id' => $machineId,
+            'product_type' => $productType,
+            'machine_description' => $machineDescription,
+            'machine_label' => formatToDateProductionMachineLabelForExport($machineDescription)
+        ];
+    };
+
+    if ($mysqli) {
+        $result = $mysqli->query("SELECT id, machine_description, product_type FROM ice_machine ORDER BY product_type, machine_description");
+        if ($result instanceof mysqli_result) {
+            while ($row = $result->fetch_assoc()) {
+                $appendColumn(
+                    isset($row['id']) ? $row['id'] : '',
+                    isset($row['machine_description']) ? $row['machine_description'] : '',
+                    isset($row['product_type']) ? $row['product_type'] : ''
+                );
+            }
+            $result->free();
+        }
+    }
+
+    foreach ($rows as $row) {
+        $appendColumn(
+            isset($row['machine_id']) ? $row['machine_id'] : '',
+            isset($row['machine_description']) ? $row['machine_description'] : '',
+            isset($row['product_type']) ? $row['product_type'] : ''
+        );
+    }
+
+    usort($columns, function ($left, $right) {
+        $typeCompare = strcasecmp((string)$left['product_type'], (string)$right['product_type']);
+        if ($typeCompare !== 0) {
+            return $typeCompare;
+        }
+
+        return strcasecmp((string)$left['machine_label'], (string)$right['machine_label']);
+    });
+
+    return $columns;
+}
+
+function buildToDateProductionMachineMatrixForExport($rows, $startDate, $endDate, $machineColumns)
+{
+    $machineColumnMap = [];
+    foreach ($machineColumns as $column) {
+        $key = isset($column['key']) ? (string)$column['key'] : '';
+        if ($key !== '') {
+            $machineColumnMap[$key] = true;
+        }
+    }
+
+    $matrixRows = [];
+    $startObject = DateTime::createFromFormat('Y-m-d', $startDate);
+    $endObject = DateTime::createFromFormat('Y-m-d', $endDate);
+    if ($startObject && $endObject) {
+        $currentObject = clone $startObject;
+        while ($currentObject <= $endObject) {
+            $dateKey = $currentObject->format('Y-m-d');
+            $matrixRows[$dateKey] = [
+                'date' => $dateKey,
+                'date_label' => $currentObject->format('d-M-y'),
+                'machines' => []
             ];
+            foreach ($machineColumns as $column) {
+                $matrixRows[$dateKey]['machines'][$column['key']] = [
+                    'hours' => 0.0,
+                    'qty' => 0.0
+                ];
+            }
+            $currentObject->modify('+1 day');
+        }
+    }
+
+    foreach ($rows as $row) {
+        $dateKey = isset($row['date_production']) ? (string)$row['date_production'] : '';
+        if (!isset($matrixRows[$dateKey])) {
+            continue;
+        }
+
+        $machineKey = trim((string)(isset($row['machine_id']) ? $row['machine_id'] : '')) . '|' . trim((string)(isset($row['machine_description']) ? $row['machine_description'] : ''));
+        if ($machineKey === '|' || !isset($machineColumnMap[$machineKey])) {
+            continue;
         }
 
         $finishedQty = isset($row['finished_ice_qty']) ? (float)$row['finished_ice_qty'] : 0.0;
         $looseQty = isset($row['loose_ice_qty']) ? (float)$row['loose_ice_qty'] : 0.0;
-
-        $groups[$productType]['machines'][$machineKey]['entry_count'] += 1;
-        $groups[$productType]['machines'][$machineKey]['finished_ice_qty'] += $finishedQty;
-        $groups[$productType]['machines'][$machineKey]['loose_ice_qty'] += $looseQty;
-
-        $groups[$productType]['subtotal_entries'] += 1;
-        $groups[$productType]['subtotal_finished'] += $finishedQty;
-        $groups[$productType]['subtotal_loose'] += $looseQty;
+        $matrixRows[$dateKey]['machines'][$machineKey]['hours'] += calculateToDateProductionHoursForExport(
+            isset($row['datetime_started']) ? $row['datetime_started'] : '',
+            isset($row['datetime_ended']) ? $row['datetime_ended'] : ''
+        );
+        $matrixRows[$dateKey]['machines'][$machineKey]['qty'] += $finishedQty + $looseQty;
     }
 
-    if (!empty($groups)) {
-        ksort($groups, SORT_NATURAL | SORT_FLAG_CASE);
-        foreach ($groups as &$groupData) {
-            uasort($groupData['machines'], function ($left, $right) {
-                return strcasecmp((string)$left['machine_description'], (string)$right['machine_description']);
-            });
+    return array_values($matrixRows);
+}
+
+function buildToDateProductionProductGroupsForExport($machineColumns)
+{
+    $groups = [];
+    foreach ($machineColumns as $column) {
+        $productType = isset($column['product_type']) ? (string)$column['product_type'] : 'UNASSIGNED';
+        if (!isset($groups[$productType])) {
+            $groups[$productType] = [
+                'product_type' => $productType,
+                'colspan' => 0,
+                'machine_columns' => []
+            ];
         }
-        unset($groupData);
+        $groups[$productType]['machine_columns'][] = $column;
+        $groups[$productType]['colspan'] += 2;
     }
 
-    return $groups;
+    foreach ($groups as &$group) {
+        $group['colspan'] += 1;
+    }
+    unset($group);
+
+    return array_values($groups);
+}
+
+function formatToDateProductionReportHeadingForExport($startDate, $endDate)
+{
+    if ($startDate === $endDate) {
+        return strtoupper(date('F d, Y', strtotime($startDate)));
+    }
+
+    return strtoupper(date('F d, Y', strtotime($startDate)) . ' TO ' . date('F d, Y', strtotime($endDate)));
 }
 
 $registerRows = fetchToDateProductionRowsForExport($mysqli, $startDate, $endDate);
@@ -218,10 +342,15 @@ $spreadsheet = new Spreadsheet();
 $sheet = $spreadsheet->getActiveSheet();
 $sheet->setTitle('To-Date Production');
 
-$sheet->setCellValue('A1', $reportType === 'by_product_machine' ? 'TO-DATE PRODUCTION REPORT (BY PRODUCT TYPE / MACHINE)' : 'TO-DATE PRODUCTION REPORT');
+$sheet->setCellValue('A1', $reportType === 'by_product_machine' ? 'DAILY PRODUCTION SUMMARY - BY MACHINE' : 'TO-DATE PRODUCTION REPORT');
 $sheet->getStyle('A1')->getFont()->setBold(true)->setSize(14);
-$sheet->setCellValue('A2', $reportRangeLabel);
-$sheet->setCellValue('A3', 'Generated: ' . $generatedAt);
+$sheet->setCellValue('A2', $reportType === 'by_product_machine' ? formatToDateProductionReportHeadingForExport($startDate, $endDate) : $reportRangeLabel);
+if ($reportType === 'by_product_machine') {
+    $sheet->getStyle('A2')->getFont()->setBold(true)->setSize(12);
+}
+if ($reportType !== 'by_product_machine') {
+    $sheet->setCellValue('A3', 'Generated: ' . $generatedAt);
+}
 
 $headerStyle = [
     'font' => ['bold' => true],
@@ -250,109 +379,130 @@ $summaryBorderStyle = [
 
 $decimalFormat = '#,##0.00';
 
-$sheet->setCellValue('I1', 'TOTAL FINISHED ICE QTY (KG)');
-$sheet->setCellValue('K1', $totalFinishedIceQty);
-$sheet->setCellValue('I2', 'TOTAL LOOSE ICE QTY (KG)');
-$sheet->setCellValue('K2', $totalLooseIceQty);
-$sheet->setCellValue('I3', 'TOTAL PRODUCTION');
-$sheet->setCellValue('K3', $entryCount);
-$sheet->setCellValue('I4', 'AVERAGE DAILY PRODUCTION');
-$sheet->setCellValue('K4', $averageDailyEntries);
-$sheet->getStyle('I1:K1')->applyFromArray($summaryBorderStyle);
-$sheet->getStyle('I2:K2')->applyFromArray($summaryBorderStyle);
-$sheet->getStyle('I3:K3')->applyFromArray($summaryBorderStyle);
-$sheet->getStyle('I4:K4')->applyFromArray($summaryBorderStyle);
-$sheet->getStyle('I1:I4')->getFont()->setBold(true);
-$sheet->getStyle('K1')->getNumberFormat()->setFormatCode($decimalFormat);
-$sheet->getStyle('K2')->getNumberFormat()->setFormatCode($decimalFormat);
-$sheet->getStyle('K3')->getNumberFormat()->setFormatCode('0');
-$sheet->getStyle('K4')->getNumberFormat()->setFormatCode($decimalFormat);
-$sheet->getStyle('K1:K4')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+if ($reportType !== 'by_product_machine') {
+    $sheet->setCellValue('I1', 'TOTAL FINISHED ICE QTY (KG)');
+    $sheet->setCellValue('K1', $totalFinishedIceQty);
+    $sheet->setCellValue('I2', 'TOTAL LOOSE ICE QTY (KG)');
+    $sheet->setCellValue('K2', $totalLooseIceQty);
+    $sheet->setCellValue('I3', 'TOTAL PRODUCTION');
+    $sheet->setCellValue('K3', $entryCount);
+    $sheet->setCellValue('I4', 'AVERAGE DAILY PRODUCTION');
+    $sheet->setCellValue('K4', $averageDailyEntries);
+    $sheet->getStyle('I1:K1')->applyFromArray($summaryBorderStyle);
+    $sheet->getStyle('I2:K2')->applyFromArray($summaryBorderStyle);
+    $sheet->getStyle('I3:K3')->applyFromArray($summaryBorderStyle);
+    $sheet->getStyle('I4:K4')->applyFromArray($summaryBorderStyle);
+    $sheet->getStyle('I1:I4')->getFont()->setBold(true);
+    $sheet->getStyle('K1')->getNumberFormat()->setFormatCode($decimalFormat);
+    $sheet->getStyle('K2')->getNumberFormat()->setFormatCode($decimalFormat);
+    $sheet->getStyle('K3')->getNumberFormat()->setFormatCode('0');
+    $sheet->getStyle('K4')->getNumberFormat()->setFormatCode($decimalFormat);
+    $sheet->getStyle('K1:K4')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+}
 
 $headerRow = 9;
 $dataRow = 10;
 
 if ($reportType === 'by_product_machine') {
-    $headers = [
-        'NO.',
-        'PRODUCT TYPE',
-        'MACHINE',
-        'PRODUCTION',
-        'FINISHED ICE QTY (KG)',
-        'LOOSE ICE QTY (KG)'
-    ];
+    $machineColumns = fetchToDateProductionMachineColumnsForExport($mysqli, $registerRows);
+    $machineProductGroups = buildToDateProductionProductGroupsForExport($machineColumns);
+    $machineMatrixRows = buildToDateProductionMachineMatrixForExport($registerRows, $startDate, $endDate, $machineColumns);
+    $measureColumnCount = 0;
+    foreach ($machineProductGroups as $productGroup) {
+        $measureColumnCount += (int)$productGroup['colspan'];
+    }
+    $measureColumnCount = max(1, $measureColumnCount);
+    $lastColumnIndex = 1 + $measureColumnCount;
+    $lastColumn = Coordinate::stringFromColumnIndex($lastColumnIndex);
 
-    $groups = buildToDateProductionMachineGroupsForExport($registerRows);
+    if ($lastColumn !== 'B') {
+        $sheet->mergeCells("B5:{$lastColumn}5");
+        $sheet->mergeCells("B6:{$lastColumn}6");
+    }
+    $sheet->mergeCells('A7:A9');
+    $sheet->setCellValue('B5', 'IN (IN KG)');
+    $sheet->setCellValue('B6', 'PRODUCTION');
+    $sheet->setCellValue('A7', 'DATE');
 
-    $sheet->fromArray($headers, null, 'A' . $headerRow);
-    $sheet->getStyle("A{$headerRow}:F{$headerRow}")->applyFromArray($headerStyle);
-    $sheet->getStyle("A{$headerRow}:F{$headerRow}")
-        ->getAlignment()
-        ->setWrapText(true)
-        ->setHorizontal(Alignment::HORIZONTAL_CENTER)
-        ->setVertical(Alignment::VERTICAL_CENTER);
+    $currentColumnIndex = 2;
+    foreach ($machineProductGroups as $productGroup) {
+        $startColumn = Coordinate::stringFromColumnIndex($currentColumnIndex);
+        $endColumn = Coordinate::stringFromColumnIndex($currentColumnIndex + (int)$productGroup['colspan'] - 1);
+        $sheet->mergeCells("{$startColumn}7:{$endColumn}7");
+        $sheet->setCellValue("{$startColumn}7", (string)$productGroup['product_type']);
+        $currentColumnIndex += (int)$productGroup['colspan'];
+    }
 
-    $currentRow = $dataRow;
-    $lineNumber = 1;
-    $grandTotalEntries = 0;
-    $grandTotalFinished = 0.0;
-    $grandTotalLoose = 0.0;
-
-    foreach ($groups as $productType => $groupData) {
-        foreach ($groupData['machines'] as $machineData) {
-            $sheet->setCellValue("A{$currentRow}", $lineNumber);
-            $sheet->setCellValue("B{$currentRow}", (string)$productType);
-            $sheet->setCellValue("C{$currentRow}", (string)$machineData['machine_description']);
-            $sheet->setCellValue("D{$currentRow}", (int)$machineData['entry_count']);
-            $sheet->setCellValue("E{$currentRow}", (float)$machineData['finished_ice_qty']);
-            $sheet->setCellValue("F{$currentRow}", (float)$machineData['loose_ice_qty']);
-            $currentRow++;
-            $lineNumber++;
+    $currentColumnIndex = 2;
+    foreach ($machineProductGroups as $productGroup) {
+        foreach ($productGroup['machine_columns'] as $machineColumn) {
+            $startColumn = Coordinate::stringFromColumnIndex($currentColumnIndex);
+            $endColumn = Coordinate::stringFromColumnIndex($currentColumnIndex + 1);
+            $sheet->mergeCells("{$startColumn}8:{$endColumn}8");
+            $sheet->setCellValue("{$startColumn}8", (string)$machineColumn['machine_label']);
+            $sheet->setCellValue("{$startColumn}9", 'HRS');
+            $sheet->setCellValue("{$endColumn}9", 'QTY');
+            $currentColumnIndex += 2;
         }
+        $subtotalColumn = Coordinate::stringFromColumnIndex($currentColumnIndex);
+        $sheet->mergeCells("{$subtotalColumn}8:{$subtotalColumn}9");
+        $sheet->setCellValue("{$subtotalColumn}8", 'SUB-TOTAL');
+        $currentColumnIndex += 1;
+    }
 
-        $sheet->setCellValue("B{$currentRow}", 'SUBTOTAL - ' . $productType);
-        $sheet->setCellValue("D{$currentRow}", (int)$groupData['subtotal_entries']);
-        $sheet->setCellValue("E{$currentRow}", (float)$groupData['subtotal_finished']);
-        $sheet->setCellValue("F{$currentRow}", (float)$groupData['subtotal_loose']);
-        $sheet->getStyle("A{$currentRow}:F{$currentRow}")->getFont()->setBold(true);
+    $currentRow = 10;
+    foreach ($machineMatrixRows as $matrixRow) {
+        $sheet->setCellValueExplicit("A{$currentRow}", (string)$matrixRow['date_label'], DataType::TYPE_STRING);
+        $currentColumnIndex = 2;
+        foreach ($machineProductGroups as $productGroup) {
+            $productSubtotalQty = 0.0;
+            foreach ($productGroup['machine_columns'] as $machineColumn) {
+                $hoursColumn = Coordinate::stringFromColumnIndex($currentColumnIndex);
+                $qtyColumn = Coordinate::stringFromColumnIndex($currentColumnIndex + 1);
+                $cell = isset($matrixRow['machines'][$machineColumn['key']]) ? $matrixRow['machines'][$machineColumn['key']] : ['hours' => 0.0, 'qty' => 0.0];
+                if (abs((float)$cell['hours']) >= 0.005) {
+                    $sheet->setCellValue("{$hoursColumn}{$currentRow}", (float)$cell['hours']);
+                }
+                if (abs((float)$cell['qty']) >= 0.005) {
+                    $sheet->setCellValue("{$qtyColumn}{$currentRow}", (float)$cell['qty']);
+                }
+                $productSubtotalQty += isset($cell['qty']) ? (float)$cell['qty'] : 0.0;
+                $currentColumnIndex += 2;
+            }
+            $subtotalColumn = Coordinate::stringFromColumnIndex($currentColumnIndex);
+            if (abs($productSubtotalQty) >= 0.005) {
+                $sheet->setCellValue("{$subtotalColumn}{$currentRow}", $productSubtotalQty);
+            }
+            $currentColumnIndex += 1;
+        }
         $currentRow++;
-
-        $grandTotalEntries += (int)$groupData['subtotal_entries'];
-        $grandTotalFinished += (float)$groupData['subtotal_finished'];
-        $grandTotalLoose += (float)$groupData['subtotal_loose'];
     }
 
-    $totalRow = $currentRow;
-    $sheet->setCellValue("C{$totalRow}", 'TOTAL');
-    $sheet->setCellValue("D{$totalRow}", $grandTotalEntries);
-    $sheet->setCellValue("E{$totalRow}", $grandTotalFinished);
-    $sheet->setCellValue("F{$totalRow}", $grandTotalLoose);
-    $sheet->getStyle("A{$totalRow}:F{$totalRow}")->getFont()->setBold(true);
-
-    $lastDataRow = $totalRow;
-    if ($lastDataRow >= $headerRow) {
-        $sheet->getStyle("A{$headerRow}:F{$lastDataRow}")->applyFromArray($borderStyle);
-    }
-    if ($lastDataRow >= $dataRow) {
-        $sheet->getStyle("D{$dataRow}:D{$lastDataRow}")->getNumberFormat()->setFormatCode('0');
-        $sheet->getStyle("E{$dataRow}:F{$lastDataRow}")->getNumberFormat()->setFormatCode($decimalFormat);
-    }
-
-    $sheet->getStyle("A{$headerRow}:C{$lastDataRow}")
+    $lastDataRow = max(10, $currentRow - 1);
+    $sheet->getStyle("A5:{$lastColumn}{$lastDataRow}")->applyFromArray($borderStyle);
+    $sheet->getStyle('A5:A6')->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_NONE);
+    $sheet->getStyle("A5:{$lastColumn}9")->getFont()->setBold(true);
+    $sheet->getStyle("A5:{$lastColumn}9")
         ->getAlignment()
         ->setHorizontal(Alignment::HORIZONTAL_CENTER)
+        ->setVertical(Alignment::VERTICAL_CENTER)
+        ->setWrapText(true);
+    $sheet->getStyle("A10:A{$lastDataRow}")
+        ->getAlignment()
+        ->setHorizontal(Alignment::HORIZONTAL_LEFT)
         ->setVertical(Alignment::VERTICAL_CENTER);
-    $sheet->getStyle("D{$headerRow}:F{$lastDataRow}")
+    $sheet->getStyle("B10:{$lastColumn}{$lastDataRow}")
         ->getAlignment()
         ->setHorizontal(Alignment::HORIZONTAL_RIGHT)
         ->setVertical(Alignment::VERTICAL_CENTER);
+    $sheet->getStyle("B10:{$lastColumn}{$lastDataRow}")->getNumberFormat()->setFormatCode($decimalFormat);
 
-    $sheet->getColumnDimension('A')->setAutoSize(false)->setWidth(5);
-    $sheet->getColumnDimension('B')->setAutoSize(false)->setWidth(20);
-    $sheet->getColumnDimension('C')->setAutoSize(false)->setWidth(42);
-    $sheet->getColumnDimension('D')->setAutoSize(false)->setWidth(12);
-    $sheet->getColumnDimension('E')->setAutoSize(false)->setWidth(20);
-    $sheet->getColumnDimension('F')->setAutoSize(false)->setWidth(20);
+    $sheet->getColumnDimension('A')->setAutoSize(false)->setWidth(14);
+    for ($columnIndex = 2; $columnIndex <= $lastColumnIndex; $columnIndex++) {
+        $sheet->getColumnDimension(Coordinate::stringFromColumnIndex($columnIndex))->setAutoSize(false)->setWidth(13);
+    }
+    $sheet->getRowDimension(8)->setRowHeight(30);
+    $sheet->freezePane('B10');
 } else {
     $headers = [
         'NO.',

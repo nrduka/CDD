@@ -67,6 +67,33 @@ function resolveProductionRangeDateTimeLabel($datetimeValue, $dateValue = '', $t
     return $dateValue;
 }
 
+function calculateToDateProductionHours($startedValue, $endedValue)
+{
+    $startedValue = trim((string)$startedValue);
+    $endedValue = trim((string)$endedValue);
+    if ($startedValue === '' || $endedValue === '') {
+        return 0.0;
+    }
+
+    $startedAt = strtotime($startedValue);
+    $endedAt = strtotime($endedValue);
+    if ($startedAt === false || $endedAt === false || $endedAt < $startedAt) {
+        return 0.0;
+    }
+
+    return ($endedAt - $startedAt) / 3600;
+}
+
+function formatToDateProductionMachineLabel($machineDescription)
+{
+    $label = strtoupper(trim((string)$machineDescription));
+    $label = preg_replace('/\s*\([^)]*\)\s*$/', '', $label);
+    $label = preg_replace('/\s+MACHINE\b/', '', $label);
+    $label = preg_replace('/\s+/', ' ', $label);
+
+    return trim($label);
+}
+
 function fetchToDateProductionRows($mysqli, $startDate, $endDate)
 {
     $rows = [];
@@ -131,66 +158,174 @@ function fetchToDateProductionRows($mysqli, $startDate, $endDate)
     return $rows;
 }
 
-function buildToDateProductionMachineGroups($rows)
+function fetchToDateProductionMachineColumns($mysqli, $rows)
 {
-    $groups = [];
-    foreach ($rows as $row) {
-        $productType = isset($row['product_type']) ? trim((string)$row['product_type']) : '';
+    $columns = [];
+    $seen = [];
+    $appendColumn = function ($machineId, $machineDescription, $productType) use (&$columns, &$seen) {
+        $machineId = trim((string)$machineId);
+        $machineDescription = trim((string)$machineDescription);
+        $productType = strtoupper(trim((string)$productType));
         if ($productType === '') {
             $productType = 'UNASSIGNED';
         }
-
-        $machineId = isset($row['machine_id']) ? trim((string)$row['machine_id']) : '';
-        $machineDescription = isset($row['machine_description']) ? trim((string)$row['machine_description']) : '';
-        $machineKey = $machineId . '|' . $machineDescription;
-
-        if (!isset($groups[$productType])) {
-            $groups[$productType] = [
-                'subtotal_entries' => 0,
-                'subtotal_finished' => 0.0,
-                'subtotal_loose' => 0.0,
-                'machines' => []
-            ];
+        if ($machineDescription === '') {
+            $machineDescription = $machineId !== '' ? 'Machine ' . $machineId : 'Unknown Machine';
         }
 
-        if (!isset($groups[$productType]['machines'][$machineKey])) {
-            $groups[$productType]['machines'][$machineKey] = [
-                'machine_description' => $machineDescription !== '' ? $machineDescription : 'Unknown Machine',
-                'entry_count' => 0,
-                'finished_ice_qty' => 0.0,
-                'loose_ice_qty' => 0.0
+        $key = $machineId . '|' . $machineDescription;
+        if (isset($seen[$key])) {
+            return;
+        }
+
+        $seen[$key] = true;
+        $columns[] = [
+            'key' => $key,
+            'machine_id' => $machineId,
+            'product_type' => $productType,
+            'machine_description' => $machineDescription,
+            'machine_label' => formatToDateProductionMachineLabel($machineDescription)
+        ];
+    };
+
+    if ($mysqli) {
+        $result = $mysqli->query("SELECT id, machine_description, product_type FROM ice_machine ORDER BY product_type, machine_description");
+        if ($result instanceof mysqli_result) {
+            while ($row = $result->fetch_assoc()) {
+                $appendColumn(
+                    isset($row['id']) ? $row['id'] : '',
+                    isset($row['machine_description']) ? $row['machine_description'] : '',
+                    isset($row['product_type']) ? $row['product_type'] : ''
+                );
+            }
+            $result->free();
+        }
+    }
+
+    foreach ($rows as $row) {
+        $appendColumn(
+            isset($row['machine_id']) ? $row['machine_id'] : '',
+            isset($row['machine_description']) ? $row['machine_description'] : '',
+            isset($row['product_type']) ? $row['product_type'] : ''
+        );
+    }
+
+    usort($columns, function ($left, $right) {
+        $typeCompare = strcasecmp((string)$left['product_type'], (string)$right['product_type']);
+        if ($typeCompare !== 0) {
+            return $typeCompare;
+        }
+
+        return strcasecmp((string)$left['machine_label'], (string)$right['machine_label']);
+    });
+
+    return $columns;
+}
+
+function buildToDateProductionMachineMatrix($rows, $startDate, $endDate, $machineColumns)
+{
+    $machineColumnMap = [];
+    foreach ($machineColumns as $column) {
+        $key = isset($column['key']) ? (string)$column['key'] : '';
+        if ($key !== '') {
+            $machineColumnMap[$key] = true;
+        }
+    }
+
+    $matrixRows = [];
+    $startObject = DateTime::createFromFormat('Y-m-d', $startDate);
+    $endObject = DateTime::createFromFormat('Y-m-d', $endDate);
+    if ($startObject && $endObject) {
+        $currentObject = clone $startObject;
+        while ($currentObject <= $endObject) {
+            $dateKey = $currentObject->format('Y-m-d');
+            $matrixRows[$dateKey] = [
+                'date' => $dateKey,
+                'date_label' => $currentObject->format('d-M-y'),
+                'machines' => []
             ];
+            foreach ($machineColumns as $column) {
+                $matrixRows[$dateKey]['machines'][$column['key']] = [
+                    'hours' => 0.0,
+                    'qty' => 0.0
+                ];
+            }
+            $currentObject->modify('+1 day');
+        }
+    }
+
+    foreach ($rows as $row) {
+        $dateKey = isset($row['date_production']) ? (string)$row['date_production'] : '';
+        if (!isset($matrixRows[$dateKey])) {
+            continue;
+        }
+
+        $machineKey = trim((string)(isset($row['machine_id']) ? $row['machine_id'] : '')) . '|' . trim((string)(isset($row['machine_description']) ? $row['machine_description'] : ''));
+        if ($machineKey === '|' || !isset($machineColumnMap[$machineKey])) {
+            continue;
         }
 
         $finishedQty = isset($row['finished_ice_qty']) ? (float)$row['finished_ice_qty'] : 0.0;
         $looseQty = isset($row['loose_ice_qty']) ? (float)$row['loose_ice_qty'] : 0.0;
-
-        $groups[$productType]['machines'][$machineKey]['entry_count'] += 1;
-        $groups[$productType]['machines'][$machineKey]['finished_ice_qty'] += $finishedQty;
-        $groups[$productType]['machines'][$machineKey]['loose_ice_qty'] += $looseQty;
-
-        $groups[$productType]['subtotal_entries'] += 1;
-        $groups[$productType]['subtotal_finished'] += $finishedQty;
-        $groups[$productType]['subtotal_loose'] += $looseQty;
+        $matrixRows[$dateKey]['machines'][$machineKey]['hours'] += calculateToDateProductionHours(
+            isset($row['datetime_started']) ? $row['datetime_started'] : '',
+            isset($row['datetime_ended']) ? $row['datetime_ended'] : ''
+        );
+        $matrixRows[$dateKey]['machines'][$machineKey]['qty'] += $finishedQty + $looseQty;
     }
 
-    if (!empty($groups)) {
-        ksort($groups, SORT_NATURAL | SORT_FLAG_CASE);
-        foreach ($groups as &$groupData) {
-            uasort($groupData['machines'], function ($left, $right) {
-                return strcasecmp((string)$left['machine_description'], (string)$right['machine_description']);
-            });
+    return array_values($matrixRows);
+}
+
+function buildToDateProductionProductGroups($machineColumns)
+{
+    $groups = [];
+    foreach ($machineColumns as $column) {
+        $productType = isset($column['product_type']) ? (string)$column['product_type'] : 'UNASSIGNED';
+        if (!isset($groups[$productType])) {
+            $groups[$productType] = [
+                'product_type' => $productType,
+                'colspan' => 0,
+                'machine_columns' => []
+            ];
         }
-        unset($groupData);
+        $groups[$productType]['machine_columns'][] = $column;
+        $groups[$productType]['colspan'] += 2;
     }
 
-    return $groups;
+    foreach ($groups as &$group) {
+        $group['colspan'] += 1;
+    }
+    unset($group);
+
+    return array_values($groups);
+}
+
+function formatToDateProductionReportHeading($startDate, $endDate)
+{
+    if ($startDate === $endDate) {
+        return strtoupper(date('F d, Y', strtotime($startDate)));
+    }
+
+    return strtoupper(date('F d, Y', strtotime($startDate)) . ' TO ' . date('F d, Y', strtotime($endDate)));
+}
+
+function formatToDateProductionMatrixNumber($value)
+{
+    $value = (float)$value;
+    if (abs($value) < 0.005) {
+        return '';
+    }
+
+    return number_format($value, 2);
 }
 
 $generatedAt = date('Y-m-d H:i:s');
 $pageError = null;
 $registerRows = [];
-$groupRows = [];
+$machineColumns = [];
+$machineProductGroups = [];
+$machineMatrixRows = [];
 $totalFinishedIceQty = 0.0;
 $totalLooseIceQty = 0.0;
 $entryCount = 0;
@@ -206,18 +341,9 @@ if (!isset($mysqli) || !$mysqli) {
     $entryCount = count($registerRows);
 
     if ($reportType === 'by_product_machine') {
-        $groups = buildToDateProductionMachineGroups($registerRows);
-        foreach ($groups as $productType => $groupData) {
-            foreach ($groupData['machines'] as $machineData) {
-                $groupRows[] = [
-                    'product_type' => $productType,
-                    'machine_description' => isset($machineData['machine_description']) ? (string)$machineData['machine_description'] : '',
-                    'entry_count' => isset($machineData['entry_count']) ? (int)$machineData['entry_count'] : 0,
-                    'finished_ice_qty' => isset($machineData['finished_ice_qty']) ? (float)$machineData['finished_ice_qty'] : 0.0,
-                    'loose_ice_qty' => isset($machineData['loose_ice_qty']) ? (float)$machineData['loose_ice_qty'] : 0.0
-                ];
-            }
-        }
+        $machineColumns = fetchToDateProductionMachineColumns($mysqli, $registerRows);
+        $machineProductGroups = buildToDateProductionProductGroups($machineColumns);
+        $machineMatrixRows = buildToDateProductionMachineMatrix($registerRows, $startDate, $endDate, $machineColumns);
     }
 }
 
@@ -230,12 +356,13 @@ $reportMeta = [
     'end_date' => $endDate,
     'report_type' => $reportType,
     'generated_at' => $generatedAt,
-    'records' => $reportType === 'by_product_machine' ? count($groupRows) : count($registerRows),
+    'records' => $reportType === 'by_product_machine' ? count($machineMatrixRows) : count($registerRows),
     'total_finished_ice_qty' => $totalFinishedIceQty,
     'total_loose_ice_qty' => $totalLooseIceQty,
     'entry_count' => $entryCount,
     'average_daily_entries' => $averageDailyEntries,
-    'report_range' => $reportRangeLabel
+    'report_range' => $reportRangeLabel,
+    'production_heading' => formatToDateProductionReportHeading($startDate, $endDate)
 ];
 
 ob_start();
@@ -270,6 +397,86 @@ ob_start();
     .todate-production-table .dataTables_scrollHeadInner table,
     .todate-production-table .dataTables_scrollBody table {
         width: 100% !important;
+    }
+    .todate-production-table .dataTables_scrollBody {
+        overflow-x: scroll !important;
+        overflow-y: auto !important;
+        scrollbar-gutter: stable both-edges;
+        scrollbar-width: auto;
+        scrollbar-color: #4b5563 #d1d5db;
+    }
+    .todate-production-table .dataTables_scrollBody::-webkit-scrollbar {
+        height: 12px;
+    }
+    .todate-production-table .dataTables_scrollBody::-webkit-scrollbar-track {
+        background: #d1d5db;
+    }
+    .todate-production-table .dataTables_scrollBody::-webkit-scrollbar-thumb {
+        background: #4b5563;
+        border-radius: 10px;
+        border: 2px solid #d1d5db;
+    }
+    .todate-production-table .dataTables_scrollBody::-webkit-scrollbar-thumb:hover {
+        background: #374151;
+    }
+    .todate-production-table table {
+        min-width: 1600px;
+        white-space: nowrap;
+    }
+    .production-summary-title {
+        color: #000;
+        font-size: 1.25rem;
+        font-weight: 700;
+        line-height: 1.2;
+    }
+    .production-summary-date {
+        color: #000;
+        font-size: 1.15rem;
+        font-weight: 700;
+        line-height: 1.2;
+    }
+    .production-summary-matrix th,
+    .production-summary-matrix td {
+        border-color: #e5e7eb !important;
+        padding: 0.75rem 0.85rem;
+        white-space: nowrap;
+    }
+    .production-summary-matrix thead th {
+        background: #fff;
+        color: #1f2937;
+        font-size: 0.78rem;
+        font-weight: 700;
+        text-align: center;
+        text-transform: uppercase;
+        vertical-align: middle;
+    }
+    .production-summary-matrix tbody td {
+        color: #4b5563;
+        font-size: 0.9rem;
+    }
+    .production-summary-matrix .matrix-spacer {
+        background: #fff;
+        min-width: 130px;
+    }
+    .production-summary-matrix .product-group-head,
+    .production-summary-matrix .section-head {
+        text-align: center !important;
+    }
+    .production-summary-matrix .date-cell {
+        min-width: 130px;
+        text-align: left;
+    }
+    .production-summary-matrix .measure-cell {
+        min-width: 78px;
+        text-align: right;
+    }
+    .production-summary-matrix .subtotal-head {
+        min-width: 104px;
+    }
+    .production-summary-matrix .subtotal-cell {
+        font-weight: 700;
+        min-width: 104px;
+        text-align: right;
     }
 </style>
 <?php
@@ -346,22 +553,79 @@ ob_start();
                 <span class="text-muted small"><?php echo number_format($reportMeta['records']); ?> record(s)</span>
             </div>
             <div class="card-body">
-                <?php if (($reportType === 'by_product_machine' && empty($groupRows)) || ($reportType !== 'by_product_machine' && empty($registerRows))): ?>
+                <?php if (($reportType === 'by_product_machine' && empty($machineColumns)) || ($reportType !== 'by_product_machine' && empty($registerRows))): ?>
                     <p class="text-muted mb-0">No production was recorded for the selected date range.</p>
                 <?php else: ?>
-                    <div class="table-responsive todate-production-table">
-                        <table id="todate-production-table" class="table table-striped align-middle mb-0 w-100">
-                            <thead>
-                                <?php if ($reportType === 'by_product_machine'): ?>
-                                    <tr class="production-head text-center align-middle">
-                                        <th>No.</th>
-                                        <th>Product Type</th>
-                                        <th>Machine</th>
-                                        <th class="text-end">Production</th>
-                                        <th class="text-end">Finished Ice Qty (Kg)</th>
-                                        <th class="text-end">Loose Ice Qty (Kg)</th>
+                    <?php if ($reportType === 'by_product_machine'): ?>
+                        <div class="mb-4">
+                            <div class="production-summary-title">DAILY PRODUCTION SUMMARY - BY MACHINE</div>
+                            <div class="production-summary-date"><?php echo htmlspecialchars($reportMeta['production_heading']); ?></div>
+                        </div>
+                    <?php endif; ?>
+                    <div class="table-responsive todate-production-table" style="overflow-x:auto;">
+                        <?php if ($reportType === 'by_product_machine'): ?>
+                            <?php
+                                $machineMeasureColspan = 0;
+                                foreach ($machineProductGroups as $productGroup) {
+                                    $machineMeasureColspan += (int)$productGroup['colspan'];
+                                }
+                                $machineMeasureColspan = max(1, $machineMeasureColspan);
+                            ?>
+                            <table id="todate-production-table" class="table table-striped production-summary-matrix align-middle mb-0 w-100">
+                                <thead>
+                                    <tr>
+                                        <th class="matrix-spacer" rowspan="2"></th>
+                                        <th class="section-head" colspan="<?php echo $machineMeasureColspan; ?>">IN (IN KG)</th>
                                     </tr>
-                                <?php else: ?>
+                                    <tr>
+                                        <th class="section-head" colspan="<?php echo $machineMeasureColspan; ?>">PRODUCTION</th>
+                                    </tr>
+                                    <tr>
+                                        <th rowspan="3">DATE</th>
+                                        <?php foreach ($machineProductGroups as $productGroup): ?>
+                                            <th class="product-group-head" colspan="<?php echo (int)$productGroup['colspan']; ?>"><?php echo htmlspecialchars($productGroup['product_type']); ?></th>
+                                        <?php endforeach; ?>
+                                    </tr>
+                                    <tr>
+                                        <?php foreach ($machineProductGroups as $productGroup): ?>
+                                            <?php foreach ($productGroup['machine_columns'] as $machineColumn): ?>
+                                                <th colspan="2"><?php echo htmlspecialchars($machineColumn['machine_label']); ?></th>
+                                            <?php endforeach; ?>
+                                            <th class="subtotal-head" rowspan="2">SUB-TOTAL</th>
+                                        <?php endforeach; ?>
+                                    </tr>
+                                    <tr>
+                                        <?php foreach ($machineProductGroups as $productGroup): ?>
+                                            <?php foreach ($productGroup['machine_columns'] as $machineColumn): ?>
+                                                <th>HRS</th>
+                                                <th>QTY</th>
+                                            <?php endforeach; ?>
+                                        <?php endforeach; ?>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($machineMatrixRows as $matrixRow): ?>
+                                        <tr>
+                                            <td class="date-cell"><?php echo htmlspecialchars($matrixRow['date_label']); ?></td>
+                                            <?php foreach ($machineProductGroups as $productGroup): ?>
+                                                <?php $productSubtotalQty = 0.0; ?>
+                                                <?php foreach ($productGroup['machine_columns'] as $machineColumn): ?>
+                                                    <?php
+                                                        $cell = isset($matrixRow['machines'][$machineColumn['key']]) ? $matrixRow['machines'][$machineColumn['key']] : ['hours' => 0.0, 'qty' => 0.0];
+                                                        $productSubtotalQty += isset($cell['qty']) ? (float)$cell['qty'] : 0.0;
+                                                    ?>
+                                                    <td class="measure-cell"><?php echo formatToDateProductionMatrixNumber($cell['hours']); ?></td>
+                                                    <td class="measure-cell"><?php echo formatToDateProductionMatrixNumber($cell['qty']); ?></td>
+                                                <?php endforeach; ?>
+                                                <td class="subtotal-cell"><?php echo formatToDateProductionMatrixNumber($productSubtotalQty); ?></td>
+                                            <?php endforeach; ?>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        <?php else: ?>
+                            <table id="todate-production-table" class="table table-striped align-middle mb-0 w-100">
+                                <thead>
                                     <tr class="production-head text-center align-middle">
                                         <th>No.</th>
                                         <th>Date/Time Started</th>
@@ -373,21 +637,8 @@ ob_start();
                                         <th class="text-end">Loose Ice Qty (Kg)</th>
                                         <th>Remarks</th>
                                     </tr>
-                                <?php endif; ?>
-                            </thead>
-                            <tbody>
-                                <?php if ($reportType === 'by_product_machine'): ?>
-                                    <?php foreach ($groupRows as $index => $row): ?>
-                                        <tr>
-                                            <td class="text-center"><?php echo $index + 1; ?></td>
-                                            <td><?php echo htmlspecialchars($row['product_type']); ?></td>
-                                            <td><?php echo htmlspecialchars($row['machine_description']); ?></td>
-                                            <td class="text-end"><?php echo number_format($row['entry_count']); ?></td>
-                                            <td class="text-end"><?php echo number_format($row['finished_ice_qty'], 2); ?></td>
-                                            <td class="text-end"><?php echo number_format($row['loose_ice_qty'], 2); ?></td>
-                                        </tr>
-                                    <?php endforeach; ?>
-                                <?php else: ?>
+                                </thead>
+                                <tbody>
                                     <?php foreach ($registerRows as $index => $row): ?>
                                         <tr>
                                             <td class="text-center"><?php echo $index + 1; ?></td>
@@ -401,9 +652,9 @@ ob_start();
                                             <td><?php echo htmlspecialchars($row['remarks']); ?></td>
                                         </tr>
                                     <?php endforeach; ?>
-                                <?php endif; ?>
-                            </tbody>
-                        </table>
+                                </tbody>
+                            </table>
+                        <?php endif; ?>
                     </div>
                 <?php endif; ?>
             </div>
@@ -420,10 +671,15 @@ $scriptsBuffer = function () use ($baseUrl) {
     <script src="<?php echo $baseUrl; ?>/assets/libs/datatables.net/js/jquery.dataTables.min.js"></script>
     <script src="<?php echo $baseUrl; ?>/assets/libs/datatables.net-bs5/js/dataTables.bootstrap5.min.js"></script>
     <script>
-        document.addEventListener('DOMContentLoaded', function () {
-            var table = document.getElementById('todate-production-table');
-            if (!table || !window.jQuery || !jQuery.fn.DataTable) { return; }
-            jQuery(table).DataTable({
+        function initToDateProductionTable() {
+            if (!window.jQuery || !jQuery.fn || !jQuery.fn.DataTable) {
+                return;
+            }
+            var table = jQuery('#todate-production-table');
+            if (!table.length || jQuery.fn.DataTable.isDataTable(table)) {
+                return;
+            }
+            var options = {
                 autoWidth: false,
                 pageLength: 25,
                 lengthChange: false,
@@ -439,8 +695,32 @@ $scriptsBuffer = function () use ($baseUrl) {
                     info: 'Showing _START_ to _END_ of _TOTAL_ records',
                     infoEmpty: 'Showing 0 to 0 of 0 records',
                     paginate: { previous: 'Previous', next: 'Next' }
+                },
+                initComplete: function () {
+                    disableToDateProductionSearchAutofill();
                 }
-            });
+            };
+            table.DataTable(options);
+            table.on('draw.dt', disableToDateProductionSearchAutofill);
+        }
+
+        function disableToDateProductionSearchAutofill() {
+            var filterInput = document.querySelector('#todate-production-table_filter input');
+            if (!filterInput) {
+                return;
+            }
+            filterInput.setAttribute('name', 'todate_production_filter');
+            filterInput.setAttribute('autocomplete', 'off');
+            filterInput.setAttribute('autocorrect', 'off');
+            filterInput.setAttribute('autocapitalize', 'off');
+            filterInput.setAttribute('spellcheck', 'false');
+            filterInput.setAttribute('data-lpignore', 'true');
+            filterInput.setAttribute('data-1p-ignore', 'true');
+            filterInput.setAttribute('data-form-type', 'other');
+        }
+
+        document.addEventListener('DOMContentLoaded', function () {
+            initToDateProductionTable();
         });
     </script>
     <?php
