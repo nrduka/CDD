@@ -167,6 +167,21 @@
                             </li>
                             <!-- End::slide -->
 
+                            <!-- Start::slide -->
+                            <li class="slide has-sub">
+                                <a href="javascript:void(0);" class="side-menu__item">
+                                    <i class="bx bx-line-chart side-menu__icon"></i>
+                                    <span class="side-menu__label">Analysis</span>
+                                    <i class="fe fe-chevron-right side-menu__angle"></i>
+                                </a>
+                                <ul class="slide-menu child1">
+                                    <li class="slide">
+                                        <a href="production_vs_sales.php" class="side-menu__item">Production vs Sales</a>
+                                    </li>
+                                </ul>
+                            </li>
+                            <!-- End::slide -->
+
 
 
                             <!-- Start::slide -->

@@ -1,0 +1,113 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Codex: CDD",
+      "type": "shell",
+      "command": "codex",
+      "args": ["--profile-v2", "cdd", "--cd", "C:\\xampp\\htdocs\\CDD"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "Codex: EFS",
+      "type": "shell",
+      "command": "codex",
+      "args": ["--profile-v2", "efs", "--cd", "C:\\xampp\\htdocs\\efs"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "Codex: Eldorado",
+      "type": "shell",
+      "command": "codex",
+      "args": ["--profile-v2", "eldorado", "--cd", "C:\\xampp\\htdocs\\eldorado"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "Codex: MPC",
+      "type": "shell",
+      "command": "codex",
+      "args": ["--profile-v2", "mpc", "--cd", "C:\\xampp\\htdocs\\mpc"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "Codex: MPCEMS",
+      "type": "shell",
+      "command": "codex",
+      "args": ["--profile-v2", "mpcems", "--cd", "C:\\xampp\\htdocs\\MPCEMS"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "Codex: MPCOPS",
+      "type": "shell",
+      "command": "codex",
+      "args": ["--profile-v2", "mpcops", "--cd", "C:\\xampp\\htdocs\\MPCOPS"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "Codex: Property Ledger",
+      "type": "shell",
+      "command": "codex",
+      "args": ["--profile-v2", "propertyledger", "--cd", "C:\\xampp\\htdocs\\propertyledger"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "Codex: Sierra",
+      "type": "shell",
+      "command": "codex",
+      "args": ["--profile-v2", "sierra", "--cd", "C:\\xampp\\htdocs\\sierra"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "Codex: SMHC",
+      "type": "shell",
+      "command": "codex",
+      "args": ["--profile-v2", "smhc", "--cd", "C:\\xampp\\htdocs\\SMHC"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated"
+      }
+    }
+  ]
+}
