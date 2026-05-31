@@ -16,6 +16,7 @@ if (!in_array($role, $allowedRoles, true) && $assignedDepartments === '') {
 }
 
 require_once __DIR__ . '/db2.php';
+require_once __DIR__ . '/report_export_runtime.php';
 
 $today = date('Y-m-d');
 $startInput = isset($_GET['start']) ? trim((string)$_GET['start']) : '';

@@ -51,6 +51,7 @@ if (!in_array($role, $allowedRoles, true) && $assignedDepartments === '') {
 
 require_once __DIR__ . '/db2.php';
 require_once __DIR__ . '/../vendor/autoload.php';
+require_once __DIR__ . '/report_export_runtime.php';
 
 if (
     !isset($mysqli)
@@ -1644,5 +1645,6 @@ header('Cache-Control: max-age=0');
 
 $writer = new Xlsx($spreadsheet);
 $writer->setPreCalculateFormulas(false);
+$writer->setUseDiskCaching(true, getSpreadsheetExportTempDirectory());
 $writer->save('php://output');
 exit;

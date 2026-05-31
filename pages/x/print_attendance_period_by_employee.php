@@ -3,6 +3,7 @@
 
 require __DIR__ . '/database-config.php';
 require __DIR__ . '/../vendor/autoload.php';
+require_once dirname(__DIR__) . '/report_export_runtime.php';
 
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
@@ -201,5 +202,7 @@ header("Content-Disposition: attachment;filename=\"$filename\"");
 header('Cache-Control: max-age=0');
 
 $writer = new Xlsx($ss);
+$writer->setPreCalculateFormulas(false);
+$writer->setUseDiskCaching(true, getSpreadsheetExportTempDirectory());
 $writer->save('php://output');
 exit;
