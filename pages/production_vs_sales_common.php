@@ -55,6 +55,28 @@ function prodSalesFormatHeading($startDate, $endDate)
     return strtoupper(date('F d, Y', strtotime($startDate)) . ' TO ' . date('F d, Y', strtotime($endDate)));
 }
 
+function prodSalesResolvePreviousDate($dateValue)
+{
+    $dateObject = DateTime::createFromFormat('Y-m-d', (string)$dateValue);
+    if (!$dateObject) {
+        return '';
+    }
+
+    $dateObject->modify('-1 day');
+
+    return $dateObject->format('Y-m-d');
+}
+
+function prodSalesFormatShortDateLabel($dateValue)
+{
+    $dateObject = DateTime::createFromFormat('Y-m-d', (string)$dateValue);
+    if (!$dateObject) {
+        return '';
+    }
+
+    return $dateObject->format('d-M-y');
+}
+
 function prodSalesResolveDateTimeLabel($datetimeValue, $dateValue = '', $timeValue = '')
 {
     $datetimeValue = trim((string)$datetimeValue);
@@ -334,6 +356,98 @@ function prodSalesTableHasColumn($mysqli, $tableName, $columnName)
     $stmt->close();
 
     return $hasColumn;
+}
+
+function prodSalesEnsureBeginningInventoryTable($mysqli)
+{
+    if (!$mysqli) {
+        return false;
+    }
+
+    $sql = "CREATE TABLE IF NOT EXISTS ice_beginning_inventory (
+                id INT NOT NULL AUTO_INCREMENT,
+                inventory_date DATE NOT NULL,
+                prod_sales_class VARCHAR(20) NOT NULL,
+                qty_kg DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                remarks VARCHAR(255) DEFAULT NULL,
+                date_created DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                date_updated DATETIME DEFAULT NULL,
+                PRIMARY KEY (id),
+                UNIQUE KEY uq_ice_beginning_inventory_class_date (prod_sales_class, inventory_date),
+                KEY idx_ice_beginning_inventory_lookup (prod_sales_class, inventory_date)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+
+    if (!$mysqli->query($sql)) {
+        return false;
+    }
+
+    $class = 'PLATE';
+    $inventoryDate = '2026-05-31';
+    $qtyKg = 10280.00;
+    $remarks = 'Beginning storage quantity provided for production vs sales analysis.';
+    $insertSql = "INSERT INTO ice_beginning_inventory (inventory_date, prod_sales_class, qty_kg, remarks)
+                  VALUES (?, ?, ?, ?)
+                  ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)";
+    $stmt = $mysqli->prepare($insertSql);
+    if (!$stmt) {
+        return false;
+    }
+    $stmt->bind_param('ssds', $inventoryDate, $class, $qtyKg, $remarks);
+    $ok = $stmt->execute();
+    $stmt->close();
+
+    return $ok;
+}
+
+function prodSalesFetchBeginningInventory($mysqli, $prodSalesClass, $startDate)
+{
+    $empty = [
+        'inventory_date' => '',
+        'qty_kg' => 0.0,
+        'remarks' => ''
+    ];
+    if (!$mysqli) {
+        return $empty;
+    }
+
+    $startObject = DateTime::createFromFormat('Y-m-d', $startDate);
+    if (!$startObject) {
+        return $empty;
+    }
+    $lookupObject = clone $startObject;
+    $lookupObject->modify('-1 day');
+    $lookupDate = $lookupObject->format('Y-m-d');
+
+    $sql = "SELECT inventory_date, qty_kg, remarks
+            FROM ice_beginning_inventory
+            WHERE UPPER(TRIM(prod_sales_class)) = ?
+              AND inventory_date <= ?
+            ORDER BY inventory_date DESC, id DESC
+            LIMIT 1";
+    $stmt = $mysqli->prepare($sql);
+    if (!$stmt) {
+        return $empty;
+    }
+
+    $class = prodSalesNormalizeClass($prodSalesClass);
+    $stmt->bind_param('ss', $class, $lookupDate);
+    if ($stmt->execute() && ($result = $stmt->get_result())) {
+        $row = $result->fetch_assoc();
+        $result->free();
+        $stmt->close();
+        if ($row) {
+            return [
+                'inventory_date' => isset($row['inventory_date']) ? (string)$row['inventory_date'] : '',
+                'qty_kg' => isset($row['qty_kg']) ? (float)$row['qty_kg'] : 0.0,
+                'remarks' => isset($row['remarks']) ? (string)$row['remarks'] : ''
+            ];
+        }
+
+        return $empty;
+    }
+    $stmt->close();
+
+    return $empty;
 }
 
 function prodSalesResolveSalesProductTypes($prodSalesClass)
@@ -713,6 +827,66 @@ function prodSalesCalculateSalesTotalQty($salesRows)
     }
 
     return $total;
+}
+
+function prodSalesCalculateProductionTotalQty($productionRows)
+{
+    $total = 0.0;
+    foreach ($productionRows as $row) {
+        $total += isset($row['production_qty']) ? (float)$row['production_qty'] : 0.0;
+    }
+
+    return $total;
+}
+
+function prodSalesCalculateOpeningInventory($mysqli, $prodSalesClass, $startDate)
+{
+    $beginning = prodSalesFetchBeginningInventory($mysqli, $prodSalesClass, $startDate);
+    $opening = [
+        'inventory_date' => $beginning['inventory_date'],
+        'source_qty_kg' => isset($beginning['qty_kg']) ? (float)$beginning['qty_kg'] : 0.0,
+        'qty_kg' => isset($beginning['qty_kg']) ? (float)$beginning['qty_kg'] : 0.0,
+        'movement_start_date' => '',
+        'movement_end_date' => '',
+        'movement_production_qty' => 0.0,
+        'movement_sales_qty' => 0.0,
+        'remarks' => isset($beginning['remarks']) ? (string)$beginning['remarks'] : ''
+    ];
+
+    if ($beginning['inventory_date'] === '') {
+        return $opening;
+    }
+
+    $startObject = DateTime::createFromFormat('Y-m-d', $startDate);
+    $beginningObject = DateTime::createFromFormat('Y-m-d', $beginning['inventory_date']);
+    if (!$startObject || !$beginningObject) {
+        return $opening;
+    }
+
+    $movementStartObject = clone $beginningObject;
+    $movementStartObject->modify('+1 day');
+    $movementEndObject = clone $startObject;
+    $movementEndObject->modify('-1 day');
+    if ($movementStartObject > $movementEndObject) {
+        return $opening;
+    }
+
+    $movementStartDate = $movementStartObject->format('Y-m-d');
+    $movementEndDate = $movementEndObject->format('Y-m-d');
+    $movementProductionQty = prodSalesCalculateProductionTotalQty(
+        prodSalesFetchProductionRows($mysqli, $movementStartDate, $movementEndDate, $prodSalesClass)
+    );
+    $movementSalesQty = prodSalesCalculateSalesTotalQty(
+        prodSalesFetchSalesRows($mysqli, $movementStartDate, $movementEndDate, $prodSalesClass)
+    );
+
+    $opening['movement_start_date'] = $movementStartDate;
+    $opening['movement_end_date'] = $movementEndDate;
+    $opening['movement_production_qty'] = $movementProductionQty;
+    $opening['movement_sales_qty'] = $movementSalesQty;
+    $opening['qty_kg'] = $opening['source_qty_kg'] + $movementProductionQty - $movementSalesQty;
+
+    return $opening;
 }
 
 function prodSalesFormatSalesProductHeader($salesProduct)

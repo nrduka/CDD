@@ -37,7 +37,16 @@ if (!isset($mysqli) || !$mysqli) {
     echo 'Database connection unavailable.';
     exit;
 }
+if (!prodSalesEnsureBeginningInventoryTable($mysqli)) {
+    http_response_code(500);
+    echo 'Beginning inventory table unavailable.';
+    exit;
+}
 
+$openingInventory = prodSalesCalculateOpeningInventory($mysqli, $prodSalesClass, $startDate);
+$openingInventoryQty = isset($openingInventory['qty_kg']) ? (float)$openingInventory['qty_kg'] : 0.0;
+$openingBalanceDate = prodSalesResolvePreviousDate($startDate);
+$openingBalanceDateLabel = prodSalesFormatShortDateLabel($openingBalanceDate);
 $productionRows = prodSalesFetchProductionRows($mysqli, $startDate, $endDate, $prodSalesClass);
 $machineColumns = prodSalesFetchMachineColumns($mysqli, $productionRows, $prodSalesClass);
 $productionMatrixRows = prodSalesBuildProductionMatrix($productionRows, $startDate, $endDate, $machineColumns);
@@ -56,7 +65,7 @@ $productionLastColumnIndex = $productionFirstColumnIndex + $measureColumnCount -
 $productionLastColumn = Coordinate::stringFromColumnIndex($productionLastColumnIndex);
 $salesColumnCount = count($salesProductColumns) + count($salesProductGroups) + 2;
 $salesFirstColumnIndex = $productionLastColumnIndex + 1;
-$salesLastColumnIndex = !empty($salesProductColumns) ? $salesFirstColumnIndex + $salesColumnCount - 1 : $productionLastColumnIndex;
+$salesLastColumnIndex = $salesFirstColumnIndex + $salesColumnCount - 1;
 $salesFirstColumn = Coordinate::stringFromColumnIndex($salesFirstColumnIndex);
 $salesLastColumn = Coordinate::stringFromColumnIndex($salesLastColumnIndex);
 $lastColumnIndex = $salesLastColumnIndex;
@@ -108,55 +117,60 @@ $salesProductColumnMap = [];
 $salesGroupSubtotalColumns = [];
 $salesTotalColumn = '';
 $inventoryVarianceColumn = '';
-if (!empty($salesProductColumns)) {
-    $sheet->mergeCells("{$salesFirstColumn}5:{$salesLastColumn}5");
-    $sheet->setCellValue("{$salesFirstColumn}5", 'SALES');
-    $sheet->mergeCells("{$salesFirstColumn}6:{$salesLastColumn}6");
-    $sheet->setCellValue("{$salesFirstColumn}6", $prodSalesClass);
+$sheet->mergeCells("{$salesFirstColumn}5:{$salesLastColumn}5");
+$sheet->setCellValue("{$salesFirstColumn}5", 'SALES');
+$sheet->mergeCells("{$salesFirstColumn}6:{$salesLastColumn}6");
+$sheet->setCellValue("{$salesFirstColumn}6", $prodSalesClass);
 
-    $salesCurrentColumnIndex = $salesFirstColumnIndex;
-    foreach ($salesProductGroups as $salesGroup) {
-        $groupStartColumnIndex = $salesCurrentColumnIndex;
-        foreach ($salesGroup['products'] as $salesProduct) {
-            $productColumn = Coordinate::stringFromColumnIndex($salesCurrentColumnIndex);
-            $sheet->setCellValueExplicit("{$productColumn}8", (string)$salesProduct['product_code'], DataType::TYPE_STRING);
-            $sheet->setCellValue("{$productColumn}9", prodSalesFormatSalesProductHeader($salesProduct));
-            $salesProductColumnMap[$salesProduct['key']] = $productColumn;
-            $salesCurrentColumnIndex++;
-        }
-
-        $groupEndColumnIndex = $salesCurrentColumnIndex - 1;
-        if ($groupEndColumnIndex >= $groupStartColumnIndex) {
-            $groupStartColumn = Coordinate::stringFromColumnIndex($groupStartColumnIndex);
-            $groupEndColumn = Coordinate::stringFromColumnIndex($groupEndColumnIndex);
-            if ($groupStartColumn !== $groupEndColumn) {
-                $sheet->mergeCells("{$groupStartColumn}7:{$groupEndColumn}7");
-            }
-            $sheet->setCellValue("{$groupStartColumn}7", (string)$salesGroup['label']);
-        }
-
-        $subtotalColumn = Coordinate::stringFromColumnIndex($salesCurrentColumnIndex);
-        $sheet->mergeCells("{$subtotalColumn}8:{$subtotalColumn}9");
-        $sheet->setCellValue("{$subtotalColumn}8", 'SUB-TOTAL');
-        $salesGroupSubtotalColumns[] = [
-            'column' => $subtotalColumn,
-            'product_start_column' => Coordinate::stringFromColumnIndex($groupStartColumnIndex),
-            'product_end_column' => Coordinate::stringFromColumnIndex($groupEndColumnIndex)
-        ];
+$salesCurrentColumnIndex = $salesFirstColumnIndex;
+foreach ($salesProductGroups as $salesGroup) {
+    $groupStartColumnIndex = $salesCurrentColumnIndex;
+    foreach ($salesGroup['products'] as $salesProduct) {
+        $productColumn = Coordinate::stringFromColumnIndex($salesCurrentColumnIndex);
+        $sheet->setCellValueExplicit("{$productColumn}8", (string)$salesProduct['product_code'], DataType::TYPE_STRING);
+        $sheet->setCellValue("{$productColumn}9", prodSalesFormatSalesProductHeader($salesProduct));
+        $salesProductColumnMap[$salesProduct['key']] = $productColumn;
         $salesCurrentColumnIndex++;
     }
 
-    $salesTotalColumn = Coordinate::stringFromColumnIndex($salesCurrentColumnIndex);
-    $sheet->mergeCells("{$salesTotalColumn}8:{$salesTotalColumn}9");
-    $sheet->setCellValue("{$salesTotalColumn}8", 'TOTAL');
+    $groupEndColumnIndex = $salesCurrentColumnIndex - 1;
+    if ($groupEndColumnIndex >= $groupStartColumnIndex) {
+        $groupStartColumn = Coordinate::stringFromColumnIndex($groupStartColumnIndex);
+        $groupEndColumn = Coordinate::stringFromColumnIndex($groupEndColumnIndex);
+        if ($groupStartColumn !== $groupEndColumn) {
+            $sheet->mergeCells("{$groupStartColumn}7:{$groupEndColumn}7");
+        }
+        $sheet->setCellValue("{$groupStartColumn}7", (string)$salesGroup['label']);
+    }
 
+    $subtotalColumn = Coordinate::stringFromColumnIndex($salesCurrentColumnIndex);
+    $sheet->mergeCells("{$subtotalColumn}8:{$subtotalColumn}9");
+    $sheet->setCellValue("{$subtotalColumn}8", 'SUB-TOTAL');
+    $salesGroupSubtotalColumns[] = [
+        'column' => $subtotalColumn,
+        'product_start_column' => Coordinate::stringFromColumnIndex($groupStartColumnIndex),
+        'product_end_column' => Coordinate::stringFromColumnIndex($groupEndColumnIndex)
+    ];
     $salesCurrentColumnIndex++;
-    $inventoryVarianceColumn = Coordinate::stringFromColumnIndex($salesCurrentColumnIndex);
-    $sheet->mergeCells("{$inventoryVarianceColumn}8:{$inventoryVarianceColumn}9");
-    $sheet->setCellValue("{$inventoryVarianceColumn}8", 'INVENTORY VARIANCE');
 }
 
+$salesTotalColumn = Coordinate::stringFromColumnIndex($salesCurrentColumnIndex);
+$sheet->mergeCells("{$salesTotalColumn}8:{$salesTotalColumn}9");
+$sheet->setCellValue("{$salesTotalColumn}8", 'TOTAL');
+
+$salesCurrentColumnIndex++;
+$inventoryVarianceColumn = Coordinate::stringFromColumnIndex($salesCurrentColumnIndex);
+$sheet->mergeCells("{$inventoryVarianceColumn}8:{$inventoryVarianceColumn}9");
+$sheet->setCellValue("{$inventoryVarianceColumn}8", 'STORAGE BALANCE');
+
 $currentRow = 10;
+$sheet->setCellValueExplicit("A{$currentRow}", $openingBalanceDateLabel . ' BEGINNING BALANCE', DataType::TYPE_STRING);
+if ($inventoryVarianceColumn !== '') {
+    $sheet->setCellValue("{$inventoryVarianceColumn}{$currentRow}", $openingInventoryQty);
+}
+$previousStorageBalanceCell = "{$inventoryVarianceColumn}{$currentRow}";
+$currentRow++;
+$detailStartRow = $currentRow;
 foreach ($productionMatrixRows as $matrixRow) {
     $sheet->setCellValueExplicit("A{$currentRow}", (string)$matrixRow['date_label'], DataType::TYPE_STRING);
     $currentColumnIndex = 2;
@@ -180,74 +194,80 @@ foreach ($productionMatrixRows as $matrixRow) {
         $sheet->setCellValue("{$totalColumn}{$currentRow}", $dailyTotal);
     }
 
-    if (!empty($salesProductColumns)) {
-        $salesMatrixRow = isset($salesMatrixByDate[$matrixRow['date']]) ? $salesMatrixByDate[$matrixRow['date']] : ['products' => []];
-        foreach ($salesProductColumns as $salesProduct) {
-            $productColumn = isset($salesProductColumnMap[$salesProduct['key']]) ? $salesProductColumnMap[$salesProduct['key']] : '';
-            if ($productColumn === '') {
-                continue;
-            }
-            $qty = isset($salesMatrixRow['products'][$salesProduct['key']]) ? (float)$salesMatrixRow['products'][$salesProduct['key']] : 0.0;
-            if (abs($qty) >= 0.005) {
-                $sheet->setCellValue("{$productColumn}{$currentRow}", $qty);
-            }
-        }
-
-        $totalFormulaParts = [];
-        foreach ($salesGroupSubtotalColumns as $subtotalMeta) {
-            $subtotalColumn = $subtotalMeta['column'];
-            $sheet->setCellValue(
-                "{$subtotalColumn}{$currentRow}",
-                "=SUM({$subtotalMeta['product_start_column']}{$currentRow}:{$subtotalMeta['product_end_column']}{$currentRow})"
-            );
-            $totalFormulaParts[] = "{$subtotalColumn}{$currentRow}";
-        }
-        if ($salesTotalColumn !== '' && !empty($totalFormulaParts)) {
-            $sheet->setCellValue("{$salesTotalColumn}{$currentRow}", '=SUM(' . implode(',', $totalFormulaParts) . ')');
-        }
-        if ($inventoryVarianceColumn !== '' && $salesTotalColumn !== '') {
-            $sheet->setCellValue("{$inventoryVarianceColumn}{$currentRow}", "={$totalColumn}{$currentRow}-{$salesTotalColumn}{$currentRow}");
-        }
-    }
-    $currentRow++;
-}
-
-$lastDetailRow = max(10, $currentRow - 1);
-$totalRow = $currentRow;
-$sheet->setCellValue("A{$totalRow}", 'TOTAL');
-
-foreach ($machineColumns as $machineColumnIndex => $machineColumn) {
-    $hoursColumn = Coordinate::stringFromColumnIndex(2 + ($machineColumnIndex * 2));
-    $qtyColumn = Coordinate::stringFromColumnIndex(3 + ($machineColumnIndex * 2));
-    $sheet->setCellValue("{$hoursColumn}{$totalRow}", "=SUM({$hoursColumn}10:{$hoursColumn}{$lastDetailRow})");
-    $sheet->setCellValue("{$qtyColumn}{$totalRow}", "=SUM({$qtyColumn}10:{$qtyColumn}{$lastDetailRow})");
-}
-$sheet->setCellValue("{$totalColumn}{$totalRow}", "=SUM({$totalColumn}10:{$totalColumn}{$lastDetailRow})");
-
-if (!empty($salesProductColumns)) {
+    $salesMatrixRow = isset($salesMatrixByDate[$matrixRow['date']]) ? $salesMatrixByDate[$matrixRow['date']] : ['products' => []];
     foreach ($salesProductColumns as $salesProduct) {
         $productColumn = isset($salesProductColumnMap[$salesProduct['key']]) ? $salesProductColumnMap[$salesProduct['key']] : '';
         if ($productColumn === '') {
             continue;
         }
-        $sheet->setCellValue("{$productColumn}{$totalRow}", "=SUM({$productColumn}10:{$productColumn}{$lastDetailRow})");
+        $qty = isset($salesMatrixRow['products'][$salesProduct['key']]) ? (float)$salesMatrixRow['products'][$salesProduct['key']] : 0.0;
+        if (abs($qty) >= 0.005) {
+            $sheet->setCellValue("{$productColumn}{$currentRow}", $qty);
+        }
     }
 
     $totalFormulaParts = [];
     foreach ($salesGroupSubtotalColumns as $subtotalMeta) {
         $subtotalColumn = $subtotalMeta['column'];
         $sheet->setCellValue(
-            "{$subtotalColumn}{$totalRow}",
-            "=SUM({$subtotalMeta['product_start_column']}{$totalRow}:{$subtotalMeta['product_end_column']}{$totalRow})"
+            "{$subtotalColumn}{$currentRow}",
+            "=SUM({$subtotalMeta['product_start_column']}{$currentRow}:{$subtotalMeta['product_end_column']}{$currentRow})"
         );
-        $totalFormulaParts[] = "{$subtotalColumn}{$totalRow}";
+        $totalFormulaParts[] = "{$subtotalColumn}{$currentRow}";
     }
-    if ($salesTotalColumn !== '' && !empty($totalFormulaParts)) {
-        $sheet->setCellValue("{$salesTotalColumn}{$totalRow}", '=SUM(' . implode(',', $totalFormulaParts) . ')');
+    if ($salesTotalColumn !== '') {
+        if (!empty($totalFormulaParts)) {
+            $sheet->setCellValue("{$salesTotalColumn}{$currentRow}", '=SUM(' . implode(',', $totalFormulaParts) . ')');
+        } else {
+            $sheet->setCellValue("{$salesTotalColumn}{$currentRow}", 0);
+        }
     }
     if ($inventoryVarianceColumn !== '' && $salesTotalColumn !== '') {
-        $sheet->setCellValue("{$inventoryVarianceColumn}{$totalRow}", "={$totalColumn}{$totalRow}-{$salesTotalColumn}{$totalRow}");
+        $sheet->setCellValue("{$inventoryVarianceColumn}{$currentRow}", "={$previousStorageBalanceCell}+{$totalColumn}{$currentRow}-{$salesTotalColumn}{$currentRow}");
+        $previousStorageBalanceCell = "{$inventoryVarianceColumn}{$currentRow}";
     }
+    $currentRow++;
+}
+
+$lastDetailRow = max($detailStartRow, $currentRow - 1);
+$totalRow = $currentRow;
+$sheet->setCellValue("A{$totalRow}", 'TOTAL');
+
+foreach ($machineColumns as $machineColumnIndex => $machineColumn) {
+    $hoursColumn = Coordinate::stringFromColumnIndex(2 + ($machineColumnIndex * 2));
+    $qtyColumn = Coordinate::stringFromColumnIndex(3 + ($machineColumnIndex * 2));
+    $sheet->setCellValue("{$hoursColumn}{$totalRow}", "=SUM({$hoursColumn}{$detailStartRow}:{$hoursColumn}{$lastDetailRow})");
+    $sheet->setCellValue("{$qtyColumn}{$totalRow}", "=SUM({$qtyColumn}{$detailStartRow}:{$qtyColumn}{$lastDetailRow})");
+}
+$sheet->setCellValue("{$totalColumn}{$totalRow}", "=SUM({$totalColumn}{$detailStartRow}:{$totalColumn}{$lastDetailRow})");
+
+foreach ($salesProductColumns as $salesProduct) {
+    $productColumn = isset($salesProductColumnMap[$salesProduct['key']]) ? $salesProductColumnMap[$salesProduct['key']] : '';
+    if ($productColumn === '') {
+        continue;
+    }
+    $sheet->setCellValue("{$productColumn}{$totalRow}", "=SUM({$productColumn}{$detailStartRow}:{$productColumn}{$lastDetailRow})");
+}
+
+$totalFormulaParts = [];
+foreach ($salesGroupSubtotalColumns as $subtotalMeta) {
+    $subtotalColumn = $subtotalMeta['column'];
+    $sheet->setCellValue(
+        "{$subtotalColumn}{$totalRow}",
+        "=SUM({$subtotalMeta['product_start_column']}{$totalRow}:{$subtotalMeta['product_end_column']}{$totalRow})"
+    );
+    $totalFormulaParts[] = "{$subtotalColumn}{$totalRow}";
+}
+if ($salesTotalColumn !== '') {
+    if (!empty($totalFormulaParts)) {
+        $sheet->setCellValue("{$salesTotalColumn}{$totalRow}", '=SUM(' . implode(',', $totalFormulaParts) . ')');
+    } else {
+        $sheet->setCellValue("{$salesTotalColumn}{$totalRow}", "=SUM({$salesTotalColumn}{$detailStartRow}:{$salesTotalColumn}{$lastDetailRow})");
+    }
+}
+if ($inventoryVarianceColumn !== '' && $salesTotalColumn !== '') {
+    $openingBalanceCell = "{$inventoryVarianceColumn}10";
+    $sheet->setCellValue("{$inventoryVarianceColumn}{$totalRow}", "={$openingBalanceCell}+{$totalColumn}{$totalRow}-{$salesTotalColumn}{$totalRow}");
 }
 
 $lastDataRow = $totalRow;
@@ -277,6 +297,7 @@ $sheet->getStyle("B10:{$lastColumn}{$lastDataRow}")
     ->setHorizontal(Alignment::HORIZONTAL_RIGHT)
     ->setVertical(Alignment::VERTICAL_CENTER);
 $sheet->getStyle("B10:{$lastColumn}{$lastDataRow}")->getNumberFormat()->setFormatCode($decimalFormat);
+$sheet->getStyle("A10:{$lastColumn}10")->getFont()->setBold(true);
 $sheet->getStyle("A{$totalRow}:{$lastColumn}{$totalRow}")->getFont()->setBold(true);
 
 $sheet->getColumnDimension('A')->setAutoSize(false)->setWidth(14);

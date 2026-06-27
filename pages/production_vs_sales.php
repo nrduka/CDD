@@ -42,30 +42,51 @@ $salesMatrixRows = [];
 $totalProductionQty = 0.0;
 $totalProductionHours = 0.0;
 $totalSalesQty = 0.0;
+$openingInventory = [
+    'inventory_date' => '',
+    'source_qty_kg' => 0.0,
+    'qty_kg' => 0.0,
+    'movement_start_date' => '',
+    'movement_end_date' => '',
+    'movement_production_qty' => 0.0,
+    'movement_sales_qty' => 0.0,
+    'remarks' => ''
+];
 
 if (!isset($mysqli) || !$mysqli) {
     $pageError = 'Database connection unavailable.';
 } else {
-    $productionRows = prodSalesFetchProductionRows($mysqli, $startDate, $endDate, $prodSalesClass);
-    foreach ($productionRows as $row) {
-        $totalProductionQty += isset($row['production_qty']) ? (float)$row['production_qty'] : 0.0;
-        $totalProductionHours += isset($row['hours']) ? (float)$row['hours'] : 0.0;
+    if (!prodSalesEnsureBeginningInventoryTable($mysqli)) {
+        $pageError = 'Beginning inventory table unavailable.';
+    } else {
+        $openingInventory = prodSalesCalculateOpeningInventory($mysqli, $prodSalesClass, $startDate);
+        $productionRows = prodSalesFetchProductionRows($mysqli, $startDate, $endDate, $prodSalesClass);
+        foreach ($productionRows as $row) {
+            $totalProductionQty += isset($row['production_qty']) ? (float)$row['production_qty'] : 0.0;
+            $totalProductionHours += isset($row['hours']) ? (float)$row['hours'] : 0.0;
+        }
+        $machineColumns = prodSalesFetchMachineColumns($mysqli, $productionRows, $prodSalesClass);
+        $productionMatrixRows = prodSalesBuildProductionMatrix($productionRows, $startDate, $endDate, $machineColumns);
+        $salesRows = prodSalesFetchSalesRows($mysqli, $startDate, $endDate, $prodSalesClass);
+        $salesProductColumns = prodSalesFetchSalesProductColumns($mysqli, $prodSalesClass, $salesRows);
+        $salesProductGroups = prodSalesBuildSalesProductGroups($salesProductColumns);
+        $salesMatrixRows = prodSalesBuildSalesMatrix($salesRows, $startDate, $endDate, $salesProductColumns);
+        $totalSalesQty = prodSalesCalculateSalesTotalQty($salesRows);
     }
-    $machineColumns = prodSalesFetchMachineColumns($mysqli, $productionRows, $prodSalesClass);
-    $productionMatrixRows = prodSalesBuildProductionMatrix($productionRows, $startDate, $endDate, $machineColumns);
-    $salesRows = prodSalesFetchSalesRows($mysqli, $startDate, $endDate, $prodSalesClass);
-    $salesProductColumns = prodSalesFetchSalesProductColumns($mysqli, $prodSalesClass, $salesRows);
-    $salesProductGroups = prodSalesBuildSalesProductGroups($salesProductColumns);
-    $salesMatrixRows = prodSalesBuildSalesMatrix($salesRows, $startDate, $endDate, $salesProductColumns);
-    $totalSalesQty = prodSalesCalculateSalesTotalQty($salesRows);
 }
 
 $dayCount = $startObject && $endObject ? $startObject->diff($endObject)->days + 1 : 1;
 $averageDailyProduction = $dayCount > 0 ? ($totalProductionQty / $dayCount) : 0;
+$openingInventoryQty = isset($openingInventory['qty_kg']) ? (float)$openingInventory['qty_kg'] : 0.0;
+$inventoryMovementQty = $totalProductionQty - $totalSalesQty;
+$endingStorageQty = $openingInventoryQty + $inventoryMovementQty;
+$openingBalanceDate = prodSalesResolvePreviousDate($startDate);
+$openingBalanceDateLabel = prodSalesFormatShortDateLabel($openingBalanceDate);
 $reportRangeLabel = 'from ' . date('F d', strtotime($startDate)) . ' to ' . date('d, Y', strtotime($endDate));
 $productionHeading = prodSalesFormatHeading($startDate, $endDate);
 $measureColumnCount = count($machineColumns) * 2 + 1;
 $salesColumnCount = count($salesProductColumns) + count($salesProductGroups) + 2;
+$showSalesColumns = true;
 $salesMatrixByDate = [];
 foreach ($salesMatrixRows as $salesMatrixRow) {
     $salesDateKey = isset($salesMatrixRow['date']) ? (string)$salesMatrixRow['date'] : '';
@@ -138,6 +159,10 @@ ob_start();
     .production-summary-matrix tbody td {
         color: #4b5563;
         font-size: 0.9rem;
+    }
+    .production-summary-matrix .beginning-balance-row td {
+        color: #000;
+        font-weight: 700;
     }
     .production-summary-matrix .matrix-spacer {
         min-width: 130px;
@@ -262,8 +287,26 @@ ob_start();
                                 <td class="value"><?php echo number_format($averageDailyProduction, 2); ?></td>
                             </tr>
                             <tr>
+                                <th class="text-uppercase small text-muted">Beginning Inventory Date</th>
+                                <td class="value">
+                                    <?php echo $openingInventory['inventory_date'] !== '' ? h(date('M d, Y', strtotime($openingInventory['inventory_date']))) : 'None'; ?>
+                                </td>
+                            </tr>
+                            <tr>
+                                <th class="text-uppercase small text-muted">Beginning Inventory Qty (Kg)</th>
+                                <td class="value"><?php echo number_format((float)$openingInventory['source_qty_kg'], 2); ?></td>
+                            </tr>
+                            <tr>
+                                <th class="text-uppercase small text-muted">Opening Storage Qty (Kg)</th>
+                                <td class="value"><?php echo number_format($openingInventoryQty, 2); ?></td>
+                            </tr>
+                            <tr>
                                 <th class="text-uppercase small text-muted">Total Sales Qty (Kg)</th>
                                 <td class="value"><?php echo number_format($totalSalesQty, 2); ?></td>
+                            </tr>
+                            <tr>
+                                <th class="text-uppercase small text-muted">Ending Storage Qty (Kg)</th>
+                                <td class="value"><?php echo number_format($endingStorageQty, 2); ?></td>
                             </tr>
                         </tbody>
                     </table>
@@ -278,7 +321,7 @@ ob_start();
         <div class="card custom-card">
             <div class="card-header d-flex justify-content-between align-items-center">
                 <h5 class="card-title mb-0">Production Analysis</h5>
-                <span class="text-muted small"><?php echo number_format(count($productionMatrixRows)); ?> day(s)</span>
+                <span class="text-muted small"><?php echo number_format(count($productionMatrixRows) + 1); ?> row(s)</span>
             </div>
             <div class="card-body">
                 <?php if (empty($machineColumns) && empty($salesProductColumns)): ?>
@@ -291,22 +334,22 @@ ob_start();
                     <div class="table-responsive production-analysis-table" style="overflow-x:auto;">
                         <table id="production-analysis-table" class="table table-striped production-summary-matrix align-middle mb-0 w-100">
                             <thead>
-                                <tr>
+                                <tr class="beginning-balance-row">
                                     <th rowspan="5">DATE</th>
                                     <th colspan="<?php echo (int)$measureColumnCount; ?>">IN (IN KG)</th>
-                                    <?php if (!empty($salesProductColumns)): ?>
+                                    <?php if ($showSalesColumns): ?>
                                         <th colspan="<?php echo (int)$salesColumnCount; ?>">SALES</th>
                                     <?php endif; ?>
                                 </tr>
                                 <tr>
                                     <th colspan="<?php echo (int)$measureColumnCount; ?>">PRODUCTION</th>
-                                    <?php if (!empty($salesProductColumns)): ?>
+                                    <?php if ($showSalesColumns): ?>
                                         <th colspan="<?php echo (int)$salesColumnCount; ?>"><?php echo h($prodSalesClass); ?></th>
                                     <?php endif; ?>
                                 </tr>
                                 <tr>
                                     <th colspan="<?php echo (int)$measureColumnCount; ?>"><?php echo h($prodSalesClass); ?></th>
-                                    <?php if (!empty($salesProductColumns)): ?>
+                                    <?php if ($showSalesColumns): ?>
                                         <?php foreach ($salesProductGroups as $salesGroup): ?>
                                             <th colspan="<?php echo count($salesGroup['products']); ?>"><?php echo h($salesGroup['label']); ?></th>
                                             <th></th>
@@ -320,7 +363,7 @@ ob_start();
                                         <th colspan="2"><?php echo h($machineColumn['machine_label']); ?></th>
                                     <?php endforeach; ?>
                                     <th rowspan="2">TOTAL</th>
-                                    <?php if (!empty($salesProductColumns)): ?>
+                                    <?php if ($showSalesColumns): ?>
                                         <?php foreach ($salesProductGroups as $salesGroup): ?>
                                             <?php foreach ($salesGroup['products'] as $salesProduct): ?>
                                                 <th><?php echo h($salesProduct['product_code']); ?></th>
@@ -328,7 +371,7 @@ ob_start();
                                             <th rowspan="2">SUB-TOTAL</th>
                                         <?php endforeach; ?>
                                         <th rowspan="2">TOTAL</th>
-                                        <th rowspan="2">INVENTORY VARIANCE</th>
+                                        <th rowspan="2">STORAGE BALANCE</th>
                                     <?php endif; ?>
                                 </tr>
                                 <tr>
@@ -336,7 +379,7 @@ ob_start();
                                         <th>HRS</th>
                                         <th>QTY</th>
                                     <?php endforeach; ?>
-                                    <?php if (!empty($salesProductColumns)): ?>
+                                    <?php if ($showSalesColumns): ?>
                                         <?php foreach ($salesProductGroups as $salesGroup): ?>
                                             <?php foreach ($salesGroup['products'] as $salesProduct): ?>
                                                 <th>
@@ -348,6 +391,25 @@ ob_start();
                                 </tr>
                             </thead>
                             <tbody>
+                                <?php $runningStorageQty = $openingInventoryQty; ?>
+                                <tr>
+                                    <td class="date-cell"><?php echo h($openingBalanceDateLabel); ?> BEGINNING BALANCE</td>
+                                    <?php foreach ($machineColumns as $machineColumn): ?>
+                                        <td class="measure-cell"></td>
+                                        <td class="measure-cell"></td>
+                                    <?php endforeach; ?>
+                                    <td class="subtotal-cell"></td>
+                                    <?php if ($showSalesColumns): ?>
+                                        <?php foreach ($salesProductGroups as $salesGroup): ?>
+                                            <?php foreach ($salesGroup['products'] as $salesProduct): ?>
+                                                <td class="product-cell"></td>
+                                            <?php endforeach; ?>
+                                            <td class="subtotal-cell"></td>
+                                        <?php endforeach; ?>
+                                        <td class="total-cell"></td>
+                                        <td class="total-cell"><?php echo prodSalesFormatSalesMatrixNumber($runningStorageQty, true); ?></td>
+                                    <?php endif; ?>
+                                </tr>
                                 <?php foreach ($productionMatrixRows as $matrixRow): ?>
                                     <?php
                                         $salesMatrixRow = isset($salesMatrixByDate[$matrixRow['date']])
@@ -366,7 +428,7 @@ ob_start();
                                             <td class="measure-cell"><?php echo prodSalesFormatMatrixNumber($cell['qty']); ?></td>
                                         <?php endforeach; ?>
                                         <td class="subtotal-cell"><?php echo prodSalesFormatMatrixNumber($dailySubtotalQty); ?></td>
-                                        <?php if (!empty($salesProductColumns)): ?>
+                                        <?php if ($showSalesColumns): ?>
                                             <?php $dailySalesGrandTotal = 0.0; ?>
                                             <?php foreach ($salesProductGroups as $salesGroup): ?>
                                                 <?php $dailySalesGroupTotal = 0.0; ?>
@@ -381,7 +443,8 @@ ob_start();
                                                 <td class="subtotal-cell"><?php echo prodSalesFormatSalesMatrixNumber($dailySalesGroupTotal); ?></td>
                                             <?php endforeach; ?>
                                             <td class="total-cell"><?php echo prodSalesFormatSalesMatrixNumber($dailySalesGrandTotal, true); ?></td>
-                                            <td class="total-cell"><?php echo prodSalesFormatSalesMatrixNumber($dailySubtotalQty - $dailySalesGrandTotal, true); ?></td>
+                                            <?php $runningStorageQty += $dailySubtotalQty - $dailySalesGrandTotal; ?>
+                                            <td class="total-cell"><?php echo prodSalesFormatSalesMatrixNumber($runningStorageQty, true); ?></td>
                                         <?php endif; ?>
                                     </tr>
                                 <?php endforeach; ?>
@@ -403,7 +466,7 @@ ob_start();
                                         <td class="measure-cell"><?php echo prodSalesFormatMatrixNumber($machineQtyTotal); ?></td>
                                     <?php endforeach; ?>
                                     <td class="subtotal-cell"><?php echo prodSalesFormatMatrixNumber($totalProductionQty); ?></td>
-                                    <?php if (!empty($salesProductColumns)): ?>
+                                    <?php if ($showSalesColumns): ?>
                                         <?php $grandSalesTotal = 0.0; ?>
                                         <?php foreach ($salesProductGroups as $salesGroup): ?>
                                             <?php $groupGrandTotal = 0.0; ?>
@@ -421,7 +484,7 @@ ob_start();
                                             <td class="subtotal-cell"><?php echo prodSalesFormatSalesMatrixNumber($groupGrandTotal, true); ?></td>
                                         <?php endforeach; ?>
                                         <td class="total-cell"><?php echo prodSalesFormatSalesMatrixNumber($grandSalesTotal, true); ?></td>
-                                        <td class="total-cell"><?php echo prodSalesFormatSalesMatrixNumber($totalProductionQty - $grandSalesTotal, true); ?></td>
+                                        <td class="total-cell"><?php echo prodSalesFormatSalesMatrixNumber($openingInventoryQty + $totalProductionQty - $grandSalesTotal, true); ?></td>
                                     <?php endif; ?>
                                 </tr>
                             </tfoot>
